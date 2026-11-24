@@ -36,3 +36,40 @@ def demo_scene(scene_id: str = "demo-bedroom") -> Scene:
                     pose=Pose(x=2.2, y=2.0), color="#b5a08a"),
     ]
     return Scene(id=scene_id, name="Demo bedroom", room=room, objects=objs)
+
+
+def demo_apartment(scene_id: str = "demo-apartment") -> Scene:
+    """Four spaces: open-plan living room + kitchen, and a bedroom and bathroom behind 12 cm walls."""
+    from .scene.models import Space
+
+    t = 0.12  # interior wall thickness
+    spaces = [
+        Space(id="living", name="Living room", kind="living", polygon=[(0, 0), (5, 0), (5, 4), (0, 4)], open_to=["kitchen"]),
+        Space(id="kitchen", name="Kitchen", kind="kitchen", polygon=[(5, 0), (8, 0), (8, 4), (5, 4)]),
+        Space(id="bedroom", name="Bedroom", kind="bedroom", polygon=[(0, 4 + t), (4, 4 + t), (4, 7.5), (0, 7.5)]),
+        Space(id="bathroom", name="Bathroom", kind="bathroom", ceiling_height=2.3,
+              polygon=[(4 + t, 4 + t), (6.5, 4 + t), (6.5, 6.5), (4 + t, 6.5)]),
+    ]
+    room = Room(spaces=spaces, ceiling_height=2.6)
+    room.openings = [
+        # living.1 runs (0,0)->(5,0); bedroom.1 (0,4.12)->(4,4.12); bathroom.1 (4.12,4.12)->(6.5,4.12)
+        Opening(id="front_door", kind="door", wall="living.1", center=1.0, width=0.9, top=2.05, swing="in", hinge="left"),
+        Opening(id="bedroom_door", kind="door", wall="bedroom.1", center=3.0, width=0.8, top=2.05, swing="in", hinge="right"),
+        Opening(id="bathroom_door", kind="door", wall="bathroom.1", center=1.4, width=0.75, top=2.05, swing="in", hinge="left"),
+        Opening(id="living_window", kind="window", wall="living.3", center=2.0, width=1.6, bottom=0.8, top=2.1),
+    ]
+    objs = [
+        SceneObject(id="sofa_1", name="Sofa", category="sofa", dims=Dims(w=2.1, d=0.9, h=0.85),
+                    pose=Pose(x=2.5, y=0.6, yaw=0), color="#7d8a96"),
+        SceneObject(id="coffee_table_1", name="Coffee table", category="coffee_table", dims=Dims(w=1.0, d=0.55, h=0.42),
+                    pose=Pose(x=2.5, y=1.8), color="#a68a64"),
+        SceneObject(id="counter_1", name="Kitchen counter", category="cabinet", dims=Dims(w=2.6, d=0.62, h=0.92),
+                    pose=Pose(x=6.6, y=0.31, yaw=0), color="#d8d4cc", locked=True),
+        SceneObject(id="island_1", name="Kitchen island", category="table", dims=Dims(w=1.6, d=0.8, h=0.92),
+                    pose=Pose(x=5.6, y=2.0, yaw=90), color="#c9c2b6"),
+        SceneObject(id="bed_1", name="Bed", category="bed", dims=Dims(w=1.6, d=2.05, h=0.95),
+                    pose=Pose(x=1.2, y=6.45, yaw=180), color="#c9b79c"),
+        SceneObject(id="toilet_1", name="Toilet", category="toilet", dims=Dims(w=0.4, d=0.7, h=0.8),
+                    pose=Pose(x=6.15, y=5.9, yaw=90), color="#f2f2f2", locked=True),
+    ]
+    return Scene(id=scene_id, name="Demo apartment", room=room, objects=objs)

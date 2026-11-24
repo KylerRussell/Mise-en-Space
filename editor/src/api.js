@@ -39,6 +39,11 @@ export const api = {
   job: (id) => req("GET", `/api/jobs/${enc(id)}`),
   ops: (s, v) => req("GET", `/api/scenes/${enc(s)}/ops?variant=${enc(v)}&limit=30`),
   fileUrl: (s, path) => `/files/${enc(s)}/${path}`,
+  addSpace: (s, body) => req("POST", `/api/scenes/${enc(s)}/spaces`, body),
+  updateSpace: (s, id, body) => req("PATCH", `/api/scenes/${enc(s)}/spaces/${enc(id)}`, body),
+  splitSpace: (s, id, body) => req("POST", `/api/scenes/${enc(s)}/spaces/${enc(id)}/split`, body),
+  mergeSpace: (s, id, other) => req("POST", `/api/scenes/${enc(s)}/spaces/${enc(id)}/merge`, { other }),
+  deleteSpace: (s, id) => req("DELETE", `/api/scenes/${enc(s)}/spaces/${enc(id)}`),
 };
 
 export function connect(sceneId, onEvent) {

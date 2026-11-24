@@ -125,29 +125,177 @@ class Wall(BaseModel):
     a: tuple[float, float]
     b: tuple[float, float]
     height: float | None = None
+    space: str | None = Field(None, description="the space this wall bounds (None for a single-room scene)")
 
     @property
     def length(self) -> float:
         return math.dist(self.a, self.b)
 
 
+SPACE_KINDS = (
+    "living", "kitchen", "dining", "bedroom", "bathroom", "office", "hallway", "entry", "closet",
+    "laundry", "storage", "balcony", "other",
+)
+
+
+def polygon_area(pts) -> float:
+    """Signed area (positive when counter-clockwise)."""
+    s = 0.0
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return s / 2
+
+
+class Space(BaseModel):
+    """A named part of the home: a room behind walls, or a zone of an open-plan area.
+
+    Every edge of ``polygon`` is a wall unless it runs along a space listed in
+    ``open_to`` (in either space's list): living room and kitchen sharing one open
+    floor are two spaces open to each other, with no wall between them.
+    """
+
+    id: str
+    name: str
+    kind: str = "other"
+    polygon: list[tuple[float, float]] = Field(min_length=3)
+    ceiling_height: float | None = None
+    open_to: list[str] = Field(default_factory=list)
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        v = v.strip().lower().replace(" ", "_")
+        return v if v in SPACE_KINDS else "other"
+
+    @model_validator(mode="after")
+    def _ccw(self) -> "Space":
+        if polygon_area(self.polygon) < 0:
+            self.polygon = list(reversed(self.polygon))
+        return self
+
+    def area(self) -> float:
+        return abs(polygon_area(self.polygon))
+
+
+def _collinear_overlaps(a, b, others, tol: float = 0.03) -> list[tuple[float, float]]:
+    """Intervals (as fractions of a->b) where segment a-b runs along any segment in `others`."""
+    ax, ay = a
+    dx, dy = b[0] - ax, b[1] - ay
+    L = math.hypot(dx, dy)
+    if L < 1e-9:
+        return []
+    ux, uy = dx / L, dy / L
+    out = []
+    for c, d in others:
+        # both ends of c-d within tol of the line through a-b, and roughly parallel
+        dc = abs((c[0] - ax) * uy - (c[1] - ay) * ux)
+        dd = abs((d[0] - ax) * uy - (d[1] - ay) * ux)
+        if dc > tol or dd > tol:
+            continue
+        t1 = ((c[0] - ax) * ux + (c[1] - ay) * uy) / L
+        t2 = ((d[0] - ax) * ux + (d[1] - ay) * uy) / L
+        lo, hi = max(0.0, min(t1, t2)), min(1.0, max(t1, t2))
+        if hi - lo > 1e-6:
+            out.append((lo, hi))
+    return out
+
+
+def _subtract(intervals: list[tuple[float, float]], min_len: float) -> list[tuple[float, float]]:
+    """[0, 1] minus the union of intervals, keeping pieces longer than min_len."""
+    cur, out = 0.0, []
+    for lo, hi in sorted(intervals):
+        if lo > cur:
+            out.append((cur, lo))
+        cur = max(cur, hi)
+    if cur < 1.0:
+        out.append((cur, 1.0))
+    return [(lo, hi) for lo, hi in out if hi - lo > min_len]
+
+
 class Room(BaseModel):
+    """The scanned floor. A single room uses ``floor_polygon``; a home with several
+    rooms lists them as ``spaces`` (``floor_polygon`` may then be left out)."""
+
     splat: str | None = Field(None, description="empty-room splat path, relative to the scene dir")
-    floor_polygon: list[tuple[float, float]] = Field(min_length=3)
+    floor_polygon: list[tuple[float, float]] | None = None
     ceiling_height: float = 2.5
+    spaces: list[Space] = Field(default_factory=list)
     walls: list[Wall] = Field(default_factory=list)
     openings: list[Opening] = Field(default_factory=list)
     planes: list[dict] = Field(default_factory=list, description="raw fitted planes from Stage 2 (n, d, label)")
 
     @model_validator(mode="after")
     def _derive_walls(self) -> "Room":
+        if not self.spaces:
+            if not self.floor_polygon or len(self.floor_polygon) < 3:
+                raise ValueError("a room needs floor_polygon or at least one space")
+        else:
+            ids = [s.id for s in self.spaces]
+            if len(set(ids)) != len(ids):
+                raise ValueError("space ids must be unique")
         if not self.walls:
-            pts = self.floor_polygon
-            self.walls = [
-                Wall(id=str(i + 1), a=pts[i], b=pts[(i + 1) % len(pts)], height=self.ceiling_height)
-                for i in range(len(pts))
-            ]
+            self.walls = self.derive_walls()
         return self
+
+    # ---- spaces ----------------------------------------------------------
+    def space_list(self) -> list[Space]:
+        """The spaces, or one implicit space covering a single-room floor."""
+        if self.spaces:
+            return self.spaces
+        return [Space(id="room", name="Room", polygon=self.floor_polygon)]
+
+    def polygons(self) -> list[list[tuple[float, float]]]:
+        return [s.polygon for s in self.space_list()]
+
+    def space(self, space_id: str) -> Space:
+        for s in self.space_list():
+            if s.id == space_id:
+                return s
+        raise KeyError(f"no space {space_id!r}")
+
+    def space_at(self, x: float, y: float) -> Space | None:
+        for s in self.space_list():
+            if _point_in(x, y, s.polygon):
+                return s
+        return None
+
+    def ceiling_for(self, space: Space | None) -> float:
+        return (space.ceiling_height if space and space.ceiling_height else None) or self.ceiling_height
+
+    def is_open(self, a: str, b: str) -> bool:
+        A = next((s for s in self.space_list() if s.id == a), None)
+        B = next((s for s in self.space_list() if s.id == b), None)
+        return bool(A and B and (b in A.open_to or a in B.open_to))
+
+    def bounds(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        xs = [p[0] for poly in self.polygons() for p in poly]
+        ys = [p[1] for poly in self.polygons() for p in poly]
+        return (min(xs), min(ys)), (max(xs), max(ys))
+
+    def derive_walls(self) -> list[Wall]:
+        if not self.spaces:
+            pts = self.floor_polygon
+            return [Wall(id=str(i + 1), a=pts[i], b=pts[(i + 1) % len(pts)], height=self.ceiling_height)
+                    for i in range(len(pts))]
+        walls = []
+        for s in self.spaces:
+            open_edges = [(o.polygon[j], o.polygon[(j + 1) % len(o.polygon)])
+                          for o in self.spaces if o.id != s.id and self.is_open(s.id, o.id)
+                          for j in range(len(o.polygon))]
+            k = 0
+            n = len(s.polygon)
+            for i in range(n):
+                a, b = s.polygon[i], s.polygon[(i + 1) % n]
+                L = math.dist(a, b)
+                for lo, hi in _subtract(_collinear_overlaps(a, b, open_edges), 0.05 / max(L, 1e-9)):
+                    k += 1
+                    pa = (a[0] + (b[0] - a[0]) * lo, a[1] + (b[1] - a[1]) * lo)
+                    pb = (a[0] + (b[0] - a[0]) * hi, a[1] + (b[1] - a[1]) * hi)
+                    walls.append(Wall(id=f"{s.id}.{k}", a=pa, b=pb, height=self.ceiling_for(s), space=s.id))
+        return walls
 
     def wall(self, wall_id: str) -> Wall:
         wid = wall_id.removeprefix("wall:")
@@ -157,18 +305,21 @@ class Room(BaseModel):
         raise KeyError(f"no wall {wall_id!r}")
 
     def floor_area(self) -> float:
-        pts = self.floor_polygon
-        s = 0.0
-        for i in range(len(pts)):
-            x1, y1 = pts[i]
-            x2, y2 = pts[(i + 1) % len(pts)]
-            s += x1 * y2 - x2 * y1
-        return abs(s) / 2
+        return sum(s.area() for s in self.space_list())
 
     def is_ccw(self) -> bool:
-        pts = self.floor_polygon
-        s = sum(pts[i][0] * pts[(i + 1) % len(pts)][1] - pts[(i + 1) % len(pts)][0] * pts[i][1] for i in range(len(pts)))
-        return s > 0
+        return polygon_area(self.space_list()[0].polygon) > 0
+
+
+def _point_in(x: float, y: float, poly) -> bool:
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if (y1 > y) != (y2 > y) and x1 + (y - y1) * (x2 - x1) / (y2 - y1) > x:
+            inside = not inside
+    return inside
 
 
 class SceneObject(BaseModel):

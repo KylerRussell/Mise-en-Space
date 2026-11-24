@@ -123,3 +123,15 @@ a { color: var(--accent); }
   .side { border: 0; }
   .topbar { flex-wrap: wrap; height: auto; padding: 6px 12px; }
 }
+
+/* spaces */
+.space-label { font-size: 13px; font-weight: 600; color: #8f846f; background: rgba(255, 255, 255, 0.7); padding: 2px 8px;
+  border-radius: 10px; pointer-events: none; white-space: nowrap; }
+.space-label.sel { color: #fff; background: #1f6feb; }
+.list li.group { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); cursor: default;
+  padding-top: 8px; background: none; }
+button.link { background: none; border: none; color: #1f6feb; padding: 0 4px; font-size: 11px; cursor: pointer; float: right; }
+.field.small { font-size: 12px; }
+.field.small input { width: 70px; }
+#viewport.picking { cursor: crosshair; }
+[hidden] { display: none !important; }

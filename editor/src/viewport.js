@@ -4,15 +4,17 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
-import { extentOf, footprint, liveConflicts } from "./geometry.js";
+import { extentOf, footprint, inAny, liveConflicts } from "./geometry.js";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 const EYE = 1.6;
 const PALETTE = ["#4e79a7", "#f28e2b", "#59a14f", "#e15759", "#76b7b2", "#edc948", "#b07aa1", "#ff9da7", "#9c755f"];
 
 export class Viewport {
-  constructor(el, { onSelect, onMoveEnd, fileUrl }) {
+  constructor(el, { onSelect, onMoveEnd, fileUrl, onFloorPick }) {
     this.el = el;
+    this.onFloorPick = onFloorPick;
+    this.pickMode = null; // { axis: "x" | "y" } while choosing where to split a space
     this.onSelect = onSelect;
     this.onMoveEnd = onMoveEnd;
     this.fileUrl = fileUrl;
@@ -90,27 +92,48 @@ export class Viewport {
     this.room = room;
     this.roomGroup.traverse((o) => { if (o.isCSS2DObject) o.element.remove(); });
     this.roomGroup.clear();
-    const poly = room.floor_polygon;
-    const shape = new THREE.Shape(poly.map(([x, y]) => new THREE.Vector2(x, y)));
-    const floor = new THREE.Mesh(new THREE.ShapeGeometry(shape),
-      new THREE.MeshStandardMaterial({ color: 0xd8ccb6, roughness: 0.9, transparent: !!room.splat, opacity: room.splat ? 0.0 : 1 }));
-    floor.name = "floor";
-    this.roomGroup.add(floor);
-    this.floor = floor;
+    const polys = room.floor_polygons || [room.floor_polygon];
+    this.polys = polys;
+    this.floors = [];
+    for (const poly of polys) {
+      const shape = new THREE.Shape(poly.map(([x, y]) => new THREE.Vector2(x, y)));
+      const floor = new THREE.Mesh(new THREE.ShapeGeometry(shape),
+        new THREE.MeshStandardMaterial({ color: 0xd8ccb6, roughness: 0.9, transparent: !!room.splat, opacity: room.splat ? 0.0 : 1 }));
+      floor.name = "floor";
+      this.roomGroup.add(floor);
+      this.floors.push(floor);
+      // space outline, dashed: it reads as a zone line wherever no wall covers it
+      const pts = [...poly, poly[0]].map(([x, y]) => new THREE.Vector3(x, y, 0.003));
+      const dash = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineDashedMaterial({ color: 0x8a8070, dashSize: 0.12, gapSize: 0.08 }));
+      dash.computeLineDistances();
+      this.roomGroup.add(dash);
+    }
+    const spaces = room.spaces || [];
+    if (spaces.length > 1) {
+      for (const sp of spaces) {
+        const xs = sp.polygon.map((p) => p[0]), ys = sp.polygon.map((p) => p[1]);
+        const tag = this._label(`${sp.name} · ${sp.area_m2.toFixed(1)} m²`, "space-label");
+        tag.element.dataset.space = sp.id;
+        tag.position.set((Math.min(...xs) + Math.max(...xs)) / 2, Math.max(...ys) - 0.35, 0.02); // top edge, clear of most furniture
+        this.roomGroup.add(tag);
+      }
+    }
     const H = room.ceiling_height;
     for (const w of room.walls) {
       const [ax, ay] = w.a, [bx, by] = w.b;
       const len = Math.hypot(bx - ax, by - ay);
-      const wall = new THREE.Mesh(new THREE.PlaneGeometry(len, H),
+      const wh = w.height || H;
+      const wall = new THREE.Mesh(new THREE.PlaneGeometry(len, wh),
         new THREE.MeshStandardMaterial({ color: 0xf4f1ea, side: THREE.BackSide, transparent: true, opacity: room.splat ? 0 : 0.85 }));
-      wall.position.set((ax + bx) / 2, (ay + by) / 2, H / 2);
+      wall.position.set((ax + bx) / 2, (ay + by) / 2, wh / 2);
       // Plane normal ends up (sin a, -cos a); point it outward so BackSide hides walls between you and the room.
       let ang = Math.atan2(by - ay, bx - ax);
       const n0 = w.inward_normal || [0, 1];
       if (Math.sin(ang) * n0[0] - Math.cos(ang) * n0[1] > 0) ang += Math.PI;
       wall.rotation.set(Math.PI / 2, 0, ang, "ZXY");
       this.roomGroup.add(wall);
-      const edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(ax, ay, 0.002), new THREE.Vector3(bx, by, 0.002)]),
+      const edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(ax, ay, 0.004), new THREE.Vector3(bx, by, 0.004)]),
         new THREE.LineBasicMaterial({ color: 0x333333 }));
       this.roomGroup.add(edge);
       const tag = this._label(`W${w.id} · ${len.toFixed(2)} m`, "wall-label");
@@ -119,6 +142,8 @@ export class Viewport {
       tag.userData.planOnly = true;
       this.roomGroup.add(tag);
     }
+    // doorways you can walk through between rooms (the gap a wall's thickness leaves)
+    this.doorways = [];
     for (const op of room.openings) {
       const pts = op.polygon.map(([x, y, z]) => new THREE.Vector3(x, y, z));
       const color = op.kind === "window" ? 0x3c82c8 : 0xb46e28;
@@ -129,13 +154,23 @@ export class Viewport {
       const tag = this._label(op.id.replace("_", " "), "op-label");
       tag.position.set((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2, op.kind === "window" ? op.top : 0.05);
       this.roomGroup.add(tag);
+      if (op.kind === "door") {
+        const n = (room.walls.find((w) => w.id === op.wall) || {}).inward_normal || [0, 0];
+        const [x0, y0] = [pts[0].x, pts[0].y], [x1, y1] = [pts[1].x, pts[1].y], d = 0.4;
+        this.doorways.push([[x0 - n[0] * d, y0 - n[1] * d], [x1 - n[0] * d, y1 - n[1] * d], [x1 + n[0] * d, y1 + n[1] * d], [x0 + n[0] * d, y0 + n[1] * d]]);
+      }
     }
     if (room.splat) {
       const splat = new SplatMesh({ url: this.fileUrl(sceneId, room.splat) });
       this.roomGroup.add(splat);
     }
-    const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
-    this.bounds = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+    const [[minX, minY], [maxX, maxY]] = [room.bounds.min, room.bounds.max];
+    this.bounds = { minX, maxX, minY, maxY };
+    this.homeBounds = { ...this.bounds };
+    this.splitLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineBasicMaterial({ color: 0x1f6feb }));
+    this.splitLine.visible = false;
+    this.roomGroup.add(this.splitLine);
     const cx = (this.bounds.minX + this.bounds.maxX) / 2, cy = (this.bounds.minY + this.bounds.maxY) / 2;
     this.controls.target.set(cx, cy, 0.8);
     if (!this._placedCamera) {
@@ -290,14 +325,27 @@ export class Viewport {
   }
 
   _insideRoom(v) {
-    const poly = this.room.floor_polygon;
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const [xi, yi] = poly[i], [xj, yj] = poly[j];
-      if ((yi > v.y) !== (yj > v.y) && v.x < ((xj - xi) * (v.y - yi)) / (yj - yi) + xi) inside = !inside;
-    }
-    return inside;
+    return inAny([v.x, v.y], this.polys) || inAny([v.x, v.y], this.doorways || []);
   }
+
+  /** Frame one space (or the whole home with null) in plan and orbit views. */
+  focusSpace(space) {
+    if (!space) this.bounds = { ...this.homeBounds };
+    else {
+      const xs = space.polygon.map((p) => p[0]), ys = space.polygon.map((p) => p[1]);
+      this.bounds = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+    }
+    const { minX, maxX, minY, maxY } = this.bounds;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, size = Math.max(maxX - minX, maxY - minY);
+    this.controls.target.set(cx, cy, 0.8);
+    if (this.mode === "orbit") this.persp.position.set(cx - 0.3 * size, cy - 1.1 * size - 1, Math.max(3, size * 1.1));
+    this._fitOrtho();
+    for (const el of this.el.querySelectorAll(".space-label")) el.classList.toggle("sel", !!space && el.dataset.space === space.id);
+  }
+
+  /** Next click on the floor reports a point; a guide line shows where an x/y split would go. */
+  startPick(axis) { this.pickMode = { axis }; this.el.classList.add("picking"); }
+  cancelPick() { this.pickMode = null; this.splitLine.visible = false; this.el.classList.remove("picking"); }
 
   _tick() {
     this.timer.update();
@@ -349,6 +397,13 @@ export class Viewport {
 
   _down(e) {
     if (this.mode === "walk" || e.button !== 0) return;
+    if (this.pickMode) {
+      const p = this._floorPoint(e);
+      const axis = this.pickMode.axis;
+      this.cancelPick();
+      if (p) this.onFloorPick?.({ x: p.x, y: p.y, axis });
+      return;
+    }
     const id = this._pick(e);
     this.onSelect(id);
     if (!id) return;
@@ -364,6 +419,18 @@ export class Viewport {
   }
 
   _move(e) {
+    if (this.pickMode) {
+      const p = this._floorPoint(e);
+      if (!p) return;
+      const { minX, maxX, minY, maxY } = this.homeBounds;
+      const at = Math.round((this.pickMode.axis === "x" ? p.x : p.y) * 20) / 20; // 5 cm steps
+      const a = this.pickMode.axis === "x" ? [at, minY - 0.3] : [minX - 0.3, at];
+      const b = this.pickMode.axis === "x" ? [at, maxY + 0.3] : [maxX + 0.3, at];
+      this.splitLine.geometry.setFromPoints([new THREE.Vector3(a[0], a[1], 0.02), new THREE.Vector3(b[0], b[1], 0.02)]);
+      this.splitLine.visible = true;
+      this.pickMode.at = at;
+      return;
+    }
     if (!this.drag) return;
     const rec = this.objects.get(this.drag.id);
     const p = this._floorPoint(e, this.drag.pose0.z);
@@ -380,7 +447,7 @@ export class Viewport {
       }
     }
     const others = [...this.objects.values()].map((r) => r.data);
-    const hits = liveConflicts(rec.data, others, this.room.floor_polygon);
+    const hits = liveConflicts(rec.data, others, this.polys);
     this._restyle(new Set(hits.length ? [rec.data.id, ...hits.map((h) => h.id)] : []));
   }
 

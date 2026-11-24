@@ -153,6 +153,58 @@ def outside_amount(poly: np.ndarray, room_poly: Sequence[Point]) -> float:
     return worst
 
 
+def outside_amount_multi(poly: np.ndarray, room_polys: Sequence[Sequence[Point]], samples: int = 4) -> float:
+    """How far (m) a footprint sticks out of the union of several floor polygons.
+
+    Corners and points along each edge are tested, so an object spanning two open
+    spaces is inside, while one hanging out of the floor is not.
+    """
+    if len(room_polys) == 1:
+        return outside_amount(poly, room_polys[0])
+    pts = []
+    for i in range(len(poly)):
+        a, b = poly[i], poly[(i + 1) % len(poly)]
+        for t in np.linspace(0, 1, samples, endpoint=False):
+            pts.append(a + (b - a) * t)
+    pts = np.array(pts)
+    rooms = [np.asarray(r, float) for r in room_polys]
+    inside = np.zeros(len(pts), bool)
+    for r in rooms:
+        inside |= points_in_polygon(pts, r)
+    if inside.all():
+        return 0.0
+    out = pts[~inside]
+    d = np.min([points_polygon_distance(out, r) for r in rooms], axis=0)
+    return float(d.max())
+
+
+def wall_crossing(poly: np.ndarray, wall: Wall) -> float:
+    """How deep (m) a convex footprint cuts through a wall segment (0 if it does not).
+
+    The depth is the smaller of the footprint's reach on either side of the wall
+    line, i.e. how far it would have to move to clear the wall.
+    """
+    a, b = np.array(wall.a, float), np.array(wall.b, float)
+    d = b - a
+    L = float(np.linalg.norm(d))
+    if L < 1e-9:
+        return 0.0
+    u = d / L
+    n = np.array([-u[1], u[0]])
+    along = (poly - a) @ u
+    side = (poly - a) @ n
+    if side.max() <= 0 or side.min() >= 0:
+        return 0.0
+    if along.max() <= 0 or along.min() >= L:
+        return 0.0
+    # the wall segment must actually pass through the footprint, not just its line
+    crosses = any(_segments_intersect(a, b, poly[i], poly[(i + 1) % len(poly)]) for i in range(len(poly)))
+    inside_end = point_in_polygon(a, poly) or point_in_polygon(b, poly)
+    if not (crosses or inside_end):
+        return 0.0
+    return float(min(side.max(), -side.min()))
+
+
 # ---- walls and openings ---------------------------------------------------
 
 def wall_inward_normal(wall: Wall, room: Room) -> np.ndarray:
@@ -160,7 +212,8 @@ def wall_inward_normal(wall: Wall, room: Room) -> np.ndarray:
     e = (b - a) / (np.linalg.norm(b - a) or 1.0)
     n = np.array([-e[1], e[0]])  # left normal
     mid = (a + b) / 2
-    if not point_in_polygon(mid + n * 0.05, room.floor_polygon):
+    polys = [room.space(wall.space).polygon] if wall.space else room.polygons()
+    if not any(point_in_polygon(mid + n * 0.05, poly) for poly in polys):
         n = -n
     return n
 

@@ -22,7 +22,10 @@ any shopping. This is the cheap checkpoint.
 
 ## 3. Gap analysis
 `get_room`, `list_objects`, `render_view(plan)` and `render_view(eye)`. Decide what to keep,
-move, hide and add, by label number and id.
+move, hide and add, by label number and id. If the home has several spaces and the request
+is about one ("redo the bedroom"), pass that `space` to these tools and to `solve_layout`,
+and leave the other rooms alone. Open-plan zones (living room + kitchen) share a floor, so
+check walkways across the zone line too.
 
 ## 4. Source products
 For each item to add, compute the largest footprint that fits (free floor, walkways

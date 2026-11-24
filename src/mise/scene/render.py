@@ -40,10 +40,38 @@ def label_map(objects: list[SceneObject]) -> dict[int, str]:
     return {i + 1: o.id for i, o in enumerate(objects)}
 
 
+def _centroid(poly: np.ndarray) -> np.ndarray:
+    x, y = poly[:, 0], poly[:, 1]
+    cr = x * np.roll(y, -1) - np.roll(x, -1) * y
+    a = cr.sum() / 2
+    if abs(a) < 1e-9:
+        return poly.mean(0)
+    return np.array([((x + np.roll(x, -1)) * cr).sum(), ((y + np.roll(y, -1)) * cr).sum()]) / (6 * a)
+
+
+def _dashed(dr, a, b, color, width=2, dash=10):
+    a, b = np.array(a, float), np.array(b, float)
+    L = float(np.linalg.norm(b - a))
+    if L < 1e-6:
+        return
+    u = (b - a) / L
+    for t in np.arange(0, L, 2 * dash):
+        dr.line([tuple(a + u * t), tuple(a + u * min(t + dash, L))], fill=color, width=width)
+
+
 def render_plan(room: Room, objects: list[SceneObject], violations: list[Violation] | None = None,
-                px_per_m: int = 120, margin: float = 0.4, show_dims: bool = True, focus: str | None = None) -> tuple[bytes, dict[int, str]]:
-    poly = np.asarray(room.floor_polygon, float)
-    lo, hi = poly.min(0) - margin, poly.max(0) + margin
+                px_per_m: int = 120, margin: float = 0.4, show_dims: bool = True, focus: str | None = None,
+                space: str | None = None) -> tuple[bytes, dict[int, str]]:
+    spaces = room.space_list()
+    multi = len(spaces) > 1
+    if space:
+        sp = np.asarray(room.space(space).polygon, float)
+        lo, hi = sp.min(0) - margin - 0.3, sp.max(0) + margin + 0.3
+    else:
+        (lx, ly), (hx, hy) = room.bounds()
+        lo, hi = np.array([lx, ly]) - margin, np.array([hx, hy]) + margin
+    if multi and not space:
+        px_per_m = min(px_per_m, int(2400 / max(hi - lo)))  # keep whole-home plans a sane size
     if focus:
         o = next(o for o in objects if o.id == focus)
         fp = g.object_footprint(o)
@@ -62,12 +90,29 @@ def render_plan(room: Room, objects: list[SceneObject], violations: list[Violati
         dr.line([P((gx, lo[1])), P((gx, hi[1]))], fill=(0, 0, 0, 18))
     for gy in np.arange(math.floor(lo[1] * 2) / 2, hi[1], 0.5):
         dr.line([P((lo[0], gy)), P((hi[0], gy))], fill=(0, 0, 0, 18))
-    dr.polygon([P(p) for p in poly], fill=(255, 255, 255, 255), outline=(40, 40, 40, 255), width=4)
+    for sp_ in spaces:
+        pl = np.asarray(sp_.polygon, float)
+        fill = (255, 255, 255, 255) if not space or sp_.id == space else (243, 242, 238, 255)
+        dr.polygon([P(p) for p in pl], fill=fill)
+        for i in range(len(pl)):  # space outlines show as faint dashes where there is no wall
+            _dashed(dr, P(pl[i]), P(pl[(i + 1) % len(pl)]), (150, 150, 150, 160))
+    for w in room.walls:
+        dr.line([P(w.a), P(w.b)], fill=(40, 40, 40, 255), width=5)
+    if multi:
+        f_space = _font(max(16, px_per_m // 5))
+        for sp_ in spaces:  # name in the space's top-left corner, clear of most furniture
+            pl = np.asarray(sp_.polygon, float)
+            corner = np.array([pl[:, 0].min() + 0.25, pl[:, 1].max() - 0.25])
+            if not g.point_in_polygon(corner, pl):
+                corner = _centroid(pl)
+            dr.text(P(corner), f"{sp_.name}  {sp_.area():.1f} m²", fill=(150, 140, 125, 255), font=f_space, anchor="la")
     for w in room.walls:
         a, b = np.array(w.a), np.array(w.b)
+        if space and w.space != space:
+            continue
         mid = (a + b) / 2 + g.wall_inward_normal(w, room) * 0.18
         dr.text(P(mid), f"W{w.id}", fill=(120, 120, 120, 255), font=f_small, anchor="mm")
-        if show_dims and not focus:
+        if show_dims and not focus and (space or not multi):
             out = (a + b) / 2 - g.wall_inward_normal(w, room) * 0.2
             dr.text(P(out), f"{w.length:.2f} m", fill=(90, 90, 90, 255), font=f_small, anchor="mm")
     for op in room.openings:
@@ -150,18 +195,18 @@ def render_perspective(room: Room, objects: list[SceneObject], eye: tuple[float,
     img = Image.new("RGBA", (W, H), (236, 233, 226, 255))
     dr = ImageDraw.Draw(img, "RGBA")
     polys = []  # (depth, pts, fill, outline)
-    poly = np.asarray(room.floor_polygon, float)
-    # floor
-    fl = [proj(np.array([*p, 0.0])) for p in poly]
     # walls (as quads); clip crudely by skipping faces with points behind the camera
     for w in room.walls:
         a, b = np.array([*w.a, 0.0]), np.array([*w.b, 0.0])
-        quad = [a, b, b + [0, 0, room.ceiling_height], a + [0, 0, room.ceiling_height]]
+        h = w.height or room.ceiling_height
+        quad = [a, b, b + [0, 0, h], a + [0, 0, h]]
         pr = [proj(q) for q in quad]
         if all(p[0] is not None for p in pr):
             polys.append((max(p[1] for p in pr) + 100, [p[0] for p in pr], (245, 243, 238, 255), (180, 175, 165, 255)))
-    if all(p[0] is not None for p in fl):
-        polys.append((1e9, [p[0] for p in fl], (214, 200, 178, 255), (150, 140, 120, 255)))
+    for pl in room.polygons():  # floors
+        fl = [proj(np.array([*p, 0.0])) for p in pl]
+        if all(p[0] is not None for p in fl):
+            polys.append((1e9, [p[0] for p in fl], (214, 200, 178, 255), (150, 140, 120, 255)))
     for op in room.openings:
         quad = [np.array(q) for q in g.opening_polygon(op, room)]
         quad = [q + np.array([*g.wall_inward_normal(room.wall(op.wall), room), 0]) * 0.01 for q in quad]
@@ -197,9 +242,10 @@ def render_perspective(room: Room, objects: list[SceneObject], eye: tuple[float,
 
 def render_view(room: Room, objects: list[SceneObject], view: Literal["plan", "eye", "object"] = "plan",
                 violations: list[Violation] | None = None, object_id: str | None = None,
-                eye: tuple[float, float, float] | None = None, target: tuple[float, float, float] | None = None) -> tuple[bytes, dict[int, str]]:
+                eye: tuple[float, float, float] | None = None, target: tuple[float, float, float] | None = None,
+                space: str | None = None) -> tuple[bytes, dict[int, str]]:
     if view == "plan":
-        return render_plan(room, objects, violations)
+        return render_plan(room, objects, violations, space=space)
     if view == "object":
         if not object_id:
             raise ValueError("view='object' needs object_id")
@@ -211,11 +257,12 @@ def render_view(room: Room, objects: list[SceneObject], view: Literal["plan", "e
         eye = (float(e2[0]), float(e2[1]), o.pose.z + o.extent().h + 0.6)
         target = (o.pose.x, o.pose.y, o.pose.z + o.extent().h / 2)
         return render_perspective(room, objects, eye, target, fov_deg=55, highlight=object_id)
-    poly = np.asarray(room.floor_polygon, float)
+    sp = room.space(space) if space else room.space_list()[0]
+    poly = np.asarray(sp.polygon, float)
     if eye is None:
-        # default: stand in the first door looking at the room center
-        doors = [op for op in room.openings if op.kind == "door"]
-        center = (poly.min(0) + poly.max(0)) / 2
+        # default: stand in a door of the space looking at its center
+        doors = [op for op in room.openings if op.kind == "door" and (room.wall(op.wall).space in (None, sp.id))]
+        center = _centroid(poly)
         if doors:
             w = room.wall(doors[0].wall)
             p = g.wall_point(w, doors[0].center) + g.wall_inward_normal(w, room) * 0.3

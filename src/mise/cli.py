@@ -1,6 +1,6 @@
 """`mise` command line.
 
-  mise demo                         create the demo bedroom scene
+  mise demo                         create the demo bedroom and demo apartment scenes
   mise serve [--port 8765]          run the scene backend (+ built editor)
   mise mcp [--http]                 run the MCP server
   mise check SCENE [--variant V]    print layout violations
@@ -27,10 +27,14 @@ def _store(args):
 
 
 def cmd_demo(args):
-    from .demo import demo_scene
+    from .demo import demo_apartment, demo_scene
     st = _store(args)
-    s = st.create(demo_scene(args.id), overwrite=args.overwrite)
-    print(f"created scene {s.id!r} in {st.scene_dir(s.id)}")
+    for scene in (demo_scene(args.id), demo_apartment()):
+        try:
+            s = st.create(scene, overwrite=args.overwrite)
+            print(f"created scene {s.id!r} in {st.scene_dir(s.id)}")
+        except FileExistsError:
+            print(f"scene {scene.id!r} exists (use --overwrite to replace it)")
 
 
 def cmd_serve(args):

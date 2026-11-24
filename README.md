@@ -71,6 +71,17 @@ render uses the extent. Only categories that truly work one way up default to
 may tip, and you can override any object with the editor's "Upright only" box. The AI can
 tip objects in its variants but can't change that setting.
 
+**Homes with several rooms.** A scene can hold `spaces`: named parts of the home
+(living, kitchen, bedroom, bathroom, hallway...), each with its own outline and optional
+ceiling height. Every edge of a space is a wall unless it borders a space it is open to,
+so an open-plan living room and kitchen are two zones of one floor with no wall between.
+Walls are derived from the spaces, doors join rooms for the walkway check, and checks
+flag furniture that cuts through an interior wall. In the editor's Spaces panel you can
+rename and retype a space, split an open area with a zone line (click the plan), merge
+zones back and delete spaces; each edit is undoable. The AI can read spaces and scope
+`list_objects`, `render_view`, `check_layout` and `solve_layout` to one of them, but only
+you can change them. `mise demo` also creates a small demo apartment.
+
 The AI (header `X-Actor: agent`) may write only to variants and never moves locked objects.
 You promote its changes into `main` from the editor, one change at a time, and every
 change is an undoable operation in `ops.jsonl`.

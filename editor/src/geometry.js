@@ -46,8 +46,10 @@ export function pointInPolygon([x, y], poly) {
 
 const IGNORED = new Set(["rug", "mat"]);
 
-/** Ids of objects that overlap `obj` (footprint + height) or stick out of the room. */
-export function liveConflicts(obj, objects, floorPolygon) {
+export const inAny = (pt, polys) => polys.some((poly) => pointInPolygon(pt, poly));
+
+/** Ids of objects that overlap `obj` (footprint + height) or stick out of the floor (any of `floorPolygons`). */
+export function liveConflicts(obj, objects, floorPolygons) {
   const E = extentOf(obj);
   const fp = footprint(obj.pose, E);
   const hits = [];
@@ -60,7 +62,7 @@ export function liveConflicts(obj, objects, floorPolygon) {
     const d = penetration(fp, footprint(o.pose, Eo));
     if (d > 0.01) hits.push({ id: o.id, depth: d });
   }
-  if (!fp.every((p) => pointInPolygon(p, floorPolygon))) hits.push({ id: "__room__", depth: 0 });
+  if (!fp.every((p) => inAny(p, floorPolygons))) hits.push({ id: "__room__", depth: 0 });
   return hits;
 }
 

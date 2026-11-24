@@ -33,6 +33,12 @@ is its size as placed. Many things work more than one way up: a cube shelf liste
 down often stands well on its end. When an object may tip, consider both ways and keep the
 one that fits the room and the brief better. Never tip an upright_required object.
 
+A home can have several spaces (living room, kitchen, bedroom...): get_room lists them
+with their outline, area, ceiling and objects. Open-plan spaces (e.g. living room and
+kitchen) share a floor with no wall; others are behind walls and joined by doors. When the
+brief is about one room, pass `space` to list_objects, render_view, check_layout and
+solve_layout. Spaces are the user's to define; you can't change them.
+
 Rules:
 - You can only edit variants. Start with create_variant; the user's own layout ("main")
   is read-only to you. The user promotes your changes from the editor, item by item.
@@ -48,6 +54,7 @@ Rules:
 
 Scene = Annotated[str, Field(description="scene id (see list_scenes)")]
 Variant = Annotated[str, Field(description="variant id; 'main' is the user's layout (read-only for you)")]
+SpaceId = Annotated[str | None, Field(description="space id from get_room (e.g. 'living', 'bedroom'); omit for the whole home")]
 
 
 def build_server(client: httpx.Client | None = None, backend: str | None = None) -> MCPServer:
@@ -76,7 +83,8 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
 
     @mcp.tool()
     def get_room(scene: Scene, variant: Variant = "main") -> dict:
-        """Room size, floor polygon, walls (with inward normals), doors, windows, free floor area and layout rules."""
+        """The home: spaces (id, name, kind, outline, area, free area, ceiling, open_to, objects), walls (with
+        inward normals and the space they bound), doors, windows, total and free floor area, and layout rules."""
         return call("GET", f"/api/scenes/{scene}/room", params={"variant": variant})
 
     @mcp.tool()
@@ -85,11 +93,15 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
         return call("GET", f"/api/scenes/{scene}/variants")
 
     @mcp.tool()
-    def list_objects(scene: Scene, variant: Variant = "main", include_hidden: bool = False) -> list[dict]:
-        """Every object in a variant: render label, dims as modeled, extent as placed (after tipping), pose,
-        support, lock flag, whether it must stay upright, and product info."""
-        objs = call("GET", f"/api/scenes/{scene}/variants/{variant}/objects", params={"include_hidden": include_hidden})
-        keep = ("label", "id", "name", "category", "dims", "extent", "pose", "support", "locked", "upright_required",
+    def list_objects(scene: Scene, variant: Variant = "main", include_hidden: bool = False,
+                     space: SpaceId = None) -> list[dict]:
+        """Every object in a variant (or one space): render label, space, dims as modeled, extent as placed
+        (after tipping), pose, support, lock flag, whether it must stay upright, and product info."""
+        params: dict[str, Any] = {"include_hidden": include_hidden}
+        if space:
+            params["space"] = space
+        objs = call("GET", f"/api/scenes/{scene}/variants/{variant}/objects", params=params)
+        keep = ("label", "id", "name", "category", "space", "dims", "extent", "pose", "support", "locked", "upright_required",
                 "source", "hidden", "warnings", "anisotropy")
         out = []
         for o in objs:
@@ -105,9 +117,13 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
                     view: Literal["plan", "eye", "object"] = "plan",
                     object_id: str | None = None,
                     eye: Annotated[list[float] | None, Field(description="[x, y, z] camera position for view='eye'")] = None,
-                    target: Annotated[list[float] | None, Field(description="[x, y, z] look-at point for view='eye'")] = None) -> list:
-        """Render a plan, eye-level or object close-up view with numbered labels. Returns the image and a label map."""
+                    target: Annotated[list[float] | None, Field(description="[x, y, z] look-at point for view='eye'")] = None,
+                    space: SpaceId = None) -> list:
+        """Render a plan, eye-level or object close-up view with numbered labels. Returns the image and a label map.
+        With `space`, the plan zooms to that space and the default eye view stands in its doorway."""
         params: dict[str, Any] = {"view": view}
+        if space:
+            params["space"] = space
         if object_id:
             params["object_id"] = object_id
         if eye:
@@ -120,9 +136,10 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
                 "label map (number -> object id): " + json.dumps(labels)]
 
     @mcp.tool()
-    def check_layout(scene: Scene, variant: Variant) -> dict:
-        """Collisions, walkway clearance, blocked doors and windows, objects outside the room. Distances in meters."""
-        return call("GET", f"/api/scenes/{scene}/variants/{variant}/check")
+    def check_layout(scene: Scene, variant: Variant, space: SpaceId = None) -> dict:
+        """Collisions, walkway clearance (through doors between rooms), blocked doors and windows, objects outside
+        the floor or cutting through walls, ceiling height per space. Distances in meters."""
+        return call("GET", f"/api/scenes/{scene}/variants/{variant}/check", params={"space": space} if space else None)
 
     @mcp.tool()
     def create_variant(scene: Scene, name: str, base: Variant = "main", notes: str = "") -> dict:
@@ -222,11 +239,15 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
                          "relational constraints, each {kind, obj, target?, min?, max?, at?, weight?}; kinds: against_wall, "
                          "centered_on_wall, near, far_from, distance, facing, in_front_of, beside, parallel, "
                          "away_from_window, at"))],
-                     movable: list[str] | None = None, iterations: int = 1500, seed: int = 0) -> dict:
+                     movable: list[str] | None = None, iterations: int = 1500, seed: int = 0,
+                     space: Annotated[str | None, Field(description=(
+                         "keep the movable objects inside this space (use it to furnish a room with newly added "
+                         "objects). Without it each object stays in the space it is in now"))] = None) -> dict:
         """Resolve poses for several objects from relations plus physics (no overlaps, inside the room,
-        door swings and walkways clear). Applies the result to the variant."""
+        no cutting through walls, door swings and walkways clear). Applies the result to the variant."""
         res = call("POST", f"/api/scenes/{scene}/variants/{variant}/solve",
-                   json={"constraints": constraints, "movable": movable, "iterations": iterations, "seed": seed})
+                   json={"constraints": constraints, "movable": movable, "iterations": iterations, "seed": seed,
+                         "space": space})
         res["constraints"] = [{"kind": c["constraint"]["kind"], "obj": c["constraint"]["obj"],
                                "target": c["constraint"].get("target"), "cost": c["cost"], "satisfied": c["satisfied"]}
                               for c in res["constraints"]]

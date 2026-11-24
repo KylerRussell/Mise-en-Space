@@ -28,6 +28,7 @@ class Violation(BaseModel):
     kind: Literal[
         "collision",
         "out_of_room",
+        "crosses_wall",
         "blocked_door",
         "blocked_window",
         "walkway",
@@ -92,18 +93,29 @@ def check_objects(room: Room, objects: list[SceneObject], rules, only: set[str] 
                     message=f"{_name(a)} overlaps {_name(b)} by {depth:.2f} m",
                 ))
 
-    # Inside the room.
+    # Inside the room (or the union of spaces), not through interior walls.
+    polys = room.polygons()
+    multi = len(polys) > 1
     for o in objects:
         if only and o.id not in only:
             continue
-        amt = g.outside_amount(fps[o.id], room.floor_polygon)
+        amt = g.outside_amount_multi(fps[o.id], polys)
         if amt > rules.collision_tolerance:
             out.append(Violation(
                 kind="out_of_room", severity="hard", objects=[o.id], amount_m=round(amt, 3),
-                message=f"{_name(o)} extends {amt:.2f} m outside the room",
+                message=f"{_name(o)} extends {amt:.2f} m outside the {'floor' if multi else 'room'}",
             ))
-        if o.pose.z + o.extent().h > room.ceiling_height + rules.collision_tolerance:
-            amt = o.pose.z + o.extent().h - room.ceiling_height
+        elif multi and not o.support.startswith("wall:"):
+            worst = max(((g.wall_crossing(fps[o.id], w), w) for w in room.walls), key=lambda t: t[0])
+            if worst[0] > rules.collision_tolerance:
+                out.append(Violation(
+                    kind="crosses_wall", severity="hard", objects=[o.id], amount_m=round(worst[0], 3),
+                    message=f"{_name(o)} cuts {worst[0]:.2f} m through wall {worst[1].id}",
+                ))
+        sp = room.space_at(o.pose.x, o.pose.y)
+        ceiling = room.ceiling_for(sp)
+        if o.pose.z + o.extent().h > ceiling + rules.collision_tolerance:
+            amt = o.pose.z + o.extent().h - ceiling
             out.append(Violation(
                 kind="out_of_room", severity="hard", objects=[o.id], amount_m=round(amt, 3),
                 message=f"{_name(o)} is {amt:.2f} m taller than the ceiling allows",
@@ -161,27 +173,31 @@ def _walkway_checks(room: Room, objects, rules, fps, only) -> list[Violation]:
     doors = [op for op in room.openings if op.kind == "door"]
     if not doors:
         return out
-    poly = np.asarray(room.floor_polygon, dtype=float)
+    polys = [np.asarray(pl, dtype=float) for pl in room.polygons()]
     step = rules.grid
-    lo, hi = poly.min(axis=0), poly.max(axis=0)
-    xs = np.arange(lo[0] + step / 2, hi[0], step)
-    ys = np.arange(lo[1] + step / 2, hi[1], step)
+    (lox, loy), (hix, hiy) = room.bounds()
+    xs = np.arange(lox + step / 2, hix, step)
+    ys = np.arange(loy + step / 2, hiy, step)
     gx, gy = np.meshgrid(xs, ys, indexing="ij")
     pts = np.stack([gx.ravel(), gy.ravel()], axis=1)
-    inside = g.points_in_polygon(pts, poly)
+    inside = np.zeros(len(pts), dtype=bool)
+    for pl in polys:
+        inside |= g.points_in_polygon(pts, pl)
 
-    # distance to walls
+    # distance to walls (open boundaries between spaces are not walls)
     dist = np.full(len(pts), np.inf)
-    for i in range(len(poly)):
-        dist = np.minimum(dist, g.points_segment_distance(pts, poly[i], poly[(i + 1) % len(poly)]))
+    for w in room.walls:
+        dist = np.minimum(dist, g.points_segment_distance(pts, np.array(w.a, float), np.array(w.b, float)))
     # distance to obstacles (floor objects that are low enough to block walking)
     nearest = np.full(len(pts), -1)
+    obj_dist = np.full(len(pts), np.inf)
     floor_objs = [o for o in objects if _on_floor(o)]
     for k, o in enumerate(floor_objs):
         d = g.points_polygon_distance(pts, fps[o.id])
         closer = d < dist
         nearest[closer] = k
         dist = np.minimum(dist, d)
+        obj_dist = np.minimum(obj_dist, d)
     dist[~inside] = -1
     shape = gx.shape
 
@@ -209,18 +225,47 @@ def _walkway_checks(room: Room, objects, rules, fps, only) -> list[Violation]:
         j = int(np.clip(round((p[1] - ys[0]) / step), 0, shape[1] - 1))
         return i, j
 
-    def door_label(op: Opening, lab: np.ndarray, r: float) -> int:
+    def door_label(op: Opening, lab: np.ndarray, r: float, side: int = 1, strict: bool = False) -> int:
+        """Walkway component next to a door: side 1 is the wall's own space, -1 the far side.
+
+        strict: walk out from the doorway and give up at the first cell that furniture
+        crowds (so a dresser parked across a door does not count as a way through).
+        """
         w = room.wall(op.wall)
-        n = g.wall_inward_normal(w, room)
+        n = g.wall_inward_normal(w, room) * side
         c = g.wall_point(w, op.center)
-        # search along the door's inward axis for the first free cell
-        for t in np.arange(r, r + 0.6, step):
+        start = step if strict else r  # the far side may be another space behind a thick wall
+        for t in np.arange(start, r + (0.6 if side == 1 else 0.9), step):
+            if strict:
+                k = np.ravel_multi_index(cell_of(c + n * t), shape)
+                if inside[k] and obj_dist[k] < r:
+                    return -1
             for s in np.linspace(-op.width / 2 + 0.05, op.width / 2 - 0.05, 5):
                 p = c + n * t + g.wall_direction(w) * s
                 ij = cell_of(p)
                 if lab[ij] >= 0:
                     return int(lab[ij])
         return -1
+
+    def merged(lab: np.ndarray, r: float) -> np.ndarray:
+        """Join components on the two sides of each door (doors link rooms)."""
+        n = int(lab.max()) + 1
+        parent = list(range(max(n, 1)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for op in doors:
+            a, b = door_label(op, lab, r, 1, strict=True), door_label(op, lab, r, -1, strict=True)
+            if a >= 0 and b >= 0:
+                parent[find(a)] = find(b)
+        out = lab.copy()
+        ok = lab >= 0
+        out[ok] = [find(int(i)) for i in lab[ok]]
+        return out
 
     def bottleneck(op_cells: list[tuple[int, int]]) -> str:
         cand = (dist > 0) & (dist < rules.walkway_min / 2)
@@ -235,7 +280,7 @@ def _walkway_checks(room: Room, objects, rules, fps, only) -> list[Violation]:
         return f"; narrowest stretch is around {_name(o)}"
 
     # Door-to-door walkway.
-    lab_walk = components(rules.walkway_min / 2)
+    lab_walk = merged(components(rules.walkway_min / 2), rules.walkway_min / 2)
     labels = {op.id: door_label(op, lab_walk, rules.walkway_min / 2) for op in doors}
     for op in doors:
         if labels[op.id] < 0:
@@ -252,7 +297,7 @@ def _walkway_checks(room: Room, objects, rules, fps, only) -> list[Violation]:
             ))
 
     # Access to furniture from a door.
-    lab_acc = components(rules.access_min / 2)
+    lab_acc = merged(components(rules.access_min / 2), rules.access_min / 2)
     door_labels = {door_label(op, lab_acc, rules.access_min / 2) for op in doors} - {-1}
     for o in floor_objs:
         if (only and o.id not in only) or o.category not in NEEDS_ACCESS:

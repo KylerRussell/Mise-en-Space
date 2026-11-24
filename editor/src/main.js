@@ -4,7 +4,8 @@ import { snapYaw } from "./geometry.js";
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
-const state = { scene: null, variant: params.get("variant") || "main", objects: [], room: null, variants: [], selected: null };
+const state = { scene: null, variant: params.get("variant") || "main", objects: [], room: null, variants: [], selected: null, space: null };
+const SPACE_KINDS = ["living", "kitchen", "dining", "bedroom", "bathroom", "office", "hallway", "entry", "closet", "laundry", "storage", "balcony", "other"];
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -23,6 +24,7 @@ async function guarded(fn) {
 
 const vp = new Viewport($("#viewport"), {
   fileUrl: api.fileUrl,
+  onFloorPick: ({ x, y, axis }) => splitAt(axis, Math.round((axis === "x" ? x : y) * 20) / 20),
   onSelect: (id) => select(id),
   onMoveEnd: (id, { x, y }) => guarded(async () => {
     const r = await api.move(state.scene, state.variant, id, { x, y, snap: true });
@@ -72,6 +74,7 @@ async function refresh({ room = false } = {}) {
   }
   state.objects = objects;
   vp.setObjects(objects);
+  renderSpaces();
   renderObjectList();
   renderWarnings(check);
   renderLibrary(library);
@@ -85,25 +88,112 @@ async function refresh({ room = false } = {}) {
 let pending = null;
 function onEvent(evt) {
   if (evt.type === "op" && evt.op?.kind === "create_variant") loadVariants();
+  const roomChanged = evt.op?.kind === "room";
   // Coalesce bursts (the AI can make many edits quickly).
   clearTimeout(pending);
   pending = setTimeout(() => {
-    if (!vp.drag) refresh();
+    if (!vp.drag) refresh({ room: roomChanged });
     if (evt.op && evt.op.actor === "agent" && evt.op.variant === state.variant) toast(`AI: ${evt.op.kind} ${evt.op.object_id ?? ""}`);
   }, 120);
 }
 
 // ---- panels ------------------------------------------------------------------
+const spaceName = (id) => state.room?.spaces?.find((s) => s.id === id)?.name ?? "outside any space";
+
+function renderSpaces() {
+  const spaces = state.room?.spaces || [];
+  if (state.space && !spaces.some((s) => s.id === state.space)) state.space = null;
+  $("#space-list").innerHTML = spaces.map((sp) => `
+    <li data-space="${esc(sp.id)}" class="${sp.id === state.space ? "sel" : ""}">
+      <span class="grow">${esc(sp.name)} <span class="dim">${esc(sp.kind)} · ${sp.area_m2.toFixed(1)} m² · ${sp.objects.length} items</span></span>
+      ${sp.open_with.length ? `<span class="pill" title="open to ${esc(sp.open_with.map(spaceName).join(", "))}">open</span>` : ""}
+    </li>`).join("");
+  for (const li of $("#space-list").children) li.onclick = () => selectSpace(li.dataset.space === state.space ? null : li.dataset.space);
+  const sp = spaces.find((s) => s.id === state.space);
+  $("#space-edit").hidden = !sp;
+  if (!sp) return;
+  $("#space-name").value = sp.name;
+  $("#space-kind").innerHTML = SPACE_KINDS.map((k) => `<option ${k === sp.kind ? "selected" : ""}>${k}</option>`).join("");
+  $("#space-ceiling").value = sp.ceiling_height ?? "";
+  $("#space-ceiling").placeholder = `${state.room.ceiling_height}`;
+  $("#space-merge-with").innerHTML = spaces.filter((s) => s.id !== sp.id).map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+  const editable = state.variant === "main";
+  for (const el of $("#space-edit").querySelectorAll("input, select, button")) el.disabled = !editable;
+  if (spaces.length < 2) $("#space-merge").disabled = $("#space-delete").disabled = $("#space-merge-with").disabled = true;
+  $("#space-hint").textContent = editable ? "" : "Spaces are edited in the main layout.";
+}
+
+function selectSpace(id) {
+  state.space = id;
+  vp.focusSpace(state.room.spaces.find((s) => s.id === id) || null);
+  renderSpaces();
+  renderObjectList();
+}
+
+async function roomEdit(fn, msg) {
+  await guarded(async () => {
+    const r = await fn();
+    if (msg) toast(msg);
+    const hard = (r?.violations || []).filter((v) => v.severity === "hard");
+    if (hard.length) toast(hard[0].message, "warn");
+    await refresh({ room: true });
+    return r;
+  });
+}
+
+function splitAt(axis, at) {
+  const sp = state.room.spaces.find((s) => s.id === state.space);
+  if (!sp) return;
+  const name = prompt(`Name for the new part of ${sp.name} (${axis === "x" ? "right of" : "above"} ${axis} = ${at.toFixed(2)} m)`, "Dining area");
+  if (!name) return;
+  const kind = SPACE_KINDS.find((k) => name.toLowerCase().includes(k.slice(0, 4))) || "other";
+  roomEdit(async () => {
+    const r = await api.splitSpace(state.scene, sp.id, { axis, at, new_name: name, new_kind: kind });
+    state.space = r.space_id;
+    return r;
+  }, `Split ${sp.name}: ${name} is a zone of the same open floor`);
+}
+
+$("#space-all").onclick = () => selectSpace(null);
+$("#space-save").onclick = () => roomEdit(() => api.updateSpace(state.scene, state.space, {
+  name: $("#space-name").value.trim() || undefined, kind: $("#space-kind").value,
+  ceiling_height: $("#space-ceiling").value ? +$("#space-ceiling").value : null,
+}), "Saved");
+for (const axis of ["x", "y"]) {
+  $(`#space-split-${axis}`).onclick = () => {
+    setView("plan");
+    vp.startPick(axis);
+    $("#space-hint").textContent = `Click the plan where the ${axis === "x" ? "vertical" : "horizontal"} zone line goes (Esc cancels).`;
+  };
+}
+$("#space-merge").onclick = () => {
+  const other = $("#space-merge-with").value;
+  if (!other) return;
+  roomEdit(() => api.mergeSpace(state.scene, state.space, other), `Merged ${spaceName(other)} into ${spaceName(state.space)}`);
+};
+$("#space-delete").onclick = () => {
+  if (!confirm(`Delete the space ${spaceName(state.space)}? Its floor leaves the model (undo restores it).`)) return;
+  const id = state.space;
+  state.space = null;
+  roomEdit(() => api.deleteSpace(state.scene, id), "Space deleted");
+};
+
 function renderObjectList() {
-  $("#object-list").innerHTML = state.objects.map((o) => `
+  const multi = (state.room?.spaces || []).length > 1;
+  const shown = state.objects.filter((o) => !state.space || o.space === state.space);
+  const groups = multi && !state.space
+    ? [...new Set(shown.map((o) => o.space))].map((sid) => [sid, shown.filter((o) => o.space === sid)])
+    : [[null, shown]];
+  $("#object-list").innerHTML = groups.map(([sid, objs]) =>
+    (multi && !state.space ? `<li class="group">${esc(spaceName(sid))}</li>` : "") + objs.map((o) => `
     <li data-id="${esc(o.id)}" class="${o.id === state.selected ? "sel" : ""}">
       <span class="num">${o.label}</span>
       <span class="grow">${esc(o.name)}</span>
       ${o.locked ? '<span class="pill">locked</span>' : ""}
       ${o.source === "product" ? '<span class="pill prod">product</span>' : ""}
       ${o.anisotropy && o.anisotropy > 1.1 ? '<span class="pill warn" title="size mismatch vs listing">size ±</span>' : ""}
-    </li>`).join("");
-  for (const li of $("#object-list").children) li.onclick = () => { select(li.dataset.id); vp.focus(li.dataset.id); };
+    </li>`).join("")).join("");
+  for (const li of $("#object-list").querySelectorAll("li[data-id]")) li.onclick = () => { select(li.dataset.id); vp.focus(li.dataset.id); };
 }
 
 function renderWarnings(check) {
@@ -174,7 +264,7 @@ function select(id) {
   state.selected = id;
   vp.select(id);
   renderSelection();
-  for (const li of $("#object-list").children) li.classList.toggle("sel", li.dataset.id === id);
+  for (const li of $("#object-list").querySelectorAll("li[data-id]")) li.classList.toggle("sel", li.dataset.id === id);
 }
 
 function renderSelection() {
@@ -183,7 +273,7 @@ function renderSelection() {
   if (!o) return;
   $("#sel-info").innerHTML = `
     <div class="title">${esc(o.name)} <span class="dim">${esc(o.id)}</span></div>
-    <div class="dim">${o.extent.w.toFixed(2)} × ${o.extent.d.toFixed(2)} × ${o.extent.h.toFixed(2)} m as placed · on ${esc(o.support)}</div>
+    <div class="dim">${o.extent.w.toFixed(2)} × ${o.extent.d.toFixed(2)} × ${o.extent.h.toFixed(2)} m as placed · on ${esc(o.support)}${(state.room?.spaces || []).length > 1 ? ` · in ${esc(spaceName(o.space))}` : ""}</div>
     <div class="dim">x ${o.pose.x.toFixed(2)} · y ${o.pose.y.toFixed(2)} · yaw ${o.pose.yaw.toFixed(0)}°${o.pose.roll || o.pose.pitch ? ` · tipped ${o.pose.roll ? `roll ${o.pose.roll}°` : ""}${o.pose.pitch ? ` pitch ${o.pose.pitch}°` : ""}` : ""}</div>
     ${o.product ? `<div><a href="${esc(o.product.url)}" target="_blank" rel="noopener">${esc(o.product.retailer || "product")}</a> ${o.product.price ?? ""} ${esc(o.product.currency ?? "")}</div>` : ""}
     ${o.moved_from_scan ? '<div class="pill warn">moved from scan: lighting is baked from its old spot</div>' : ""}
@@ -249,10 +339,10 @@ $("#toggle-lock").onclick = () => guarded(async () => {
   await api.update(state.scene, "main", o.id, { locked: !o.locked });
   await refresh();
 });
-$("#undo").onclick = () => guarded(async () => { const r = await api.undo(state.scene, state.variant); if (!r.undone) toast("Nothing to undo"); await refresh(); });
-$("#redo").onclick = () => guarded(async () => { const r = await api.redo(state.scene, state.variant); if (!r.redone) toast("Nothing to redo"); await refresh(); });
+$("#undo").onclick = () => guarded(async () => { const r = await api.undo(state.scene, state.variant); if (!r.undone) toast("Nothing to undo"); await refresh({ room: true }); });
+$("#redo").onclick = () => guarded(async () => { const r = await api.redo(state.scene, state.variant); if (!r.redone) toast("Nothing to redo"); await refresh({ room: true }); });
 
-$("#scene-select").onchange = (e) => { state.scene = e.target.value; state.variant = "main"; state.room = null; openScene(); };
+$("#scene-select").onchange = (e) => { state.scene = e.target.value; state.variant = "main"; state.room = null; state.space = null; openScene(); };
 $("#variant-select").onchange = (e) => { state.variant = e.target.value; select(null); refresh(); };
 $("#new-variant").onclick = () => guarded(async () => {
   const name = prompt("Name for the new layout", `Layout ${state.variants.length}`);
@@ -331,7 +421,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "r" || e.key === "R") rotate(90);
   else if (e.key === "t" || e.key === "T") tip();
   else if (e.key === "Delete" || e.key === "Backspace") removeSelected();
-  else if (e.key === "Escape") select(null);
+  else if (e.key === "Escape") { if (vp.pickMode) { vp.cancelPick(); $("#space-hint").textContent = ""; } else select(null); }
   else if (e.key === "1") setView("orbit");
   else if (e.key === "2") setView("walk");
   else if (e.key === "3") setView("plan");

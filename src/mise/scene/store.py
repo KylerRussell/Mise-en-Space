@@ -17,8 +17,8 @@ from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
-from . import checks, placement
-from .models import MAIN, LibraryAsset, Pose, Scene, SceneObject, Variant, now_iso
+from . import checks, placement, spaces
+from .models import MAIN, LibraryAsset, Pose, Room, Scene, SceneObject, Variant, now_iso
 
 Actor = Literal["user", "agent", "pipeline"]
 
@@ -32,7 +32,7 @@ class Op(BaseModel):
     ts: str = Field(default_factory=now_iso)
     actor: Actor = "user"
     variant: str = MAIN
-    kind: Literal["move", "add", "hide", "show", "delete", "update", "create_variant", "delete_variant", "library_add", "promote"]
+    kind: Literal["move", "add", "hide", "show", "delete", "update", "create_variant", "delete_variant", "library_add", "promote", "room"]
     object_id: str | None = None
     before: dict | None = None
     after: dict | None = None
@@ -389,6 +389,63 @@ class SceneStore:
             self._commit(scene_id, op)
             return {"op_id": op.id, "object": obj.model_dump()}
 
+    # ---- spaces (rooms) ---------------------------------------------------------
+    def _support_refs(self, scene: Scene) -> list[dict]:
+        """Every wall support in main and in variants, with where its object stands."""
+        refs = []
+        for o in scene.objects:
+            if o.support.startswith("wall:"):
+                refs.append({"where": "main", "id": o.id, "support": o.support, "xy": (o.pose.x, o.pose.y)})
+        for v in scene.variants:
+            for o in v.added:
+                if o.support.startswith("wall:"):
+                    refs.append({"where": f"added:{v.id}", "id": o.id, "support": o.support, "xy": (o.pose.x, o.pose.y)})
+            for oid, sup in v.supports.items():
+                if sup.startswith("wall:"):
+                    pose = v.poses.get(oid) or next((o.pose for o in scene.objects if o.id == oid), None)
+                    xy = (pose.x, pose.y) if pose else (0.0, 0.0)
+                    refs.append({"where": f"supports:{v.id}", "id": oid, "support": sup, "xy": xy})
+        return refs
+
+    def _restore_support(self, scene: Scene, item: dict) -> None:
+        where, oid, sup = item["where"], item["id"], item["support"]
+        if where == "main":
+            for o in scene.objects:
+                if o.id == oid:
+                    o.support = sup
+        elif where.startswith("added:"):
+            for o in scene.variant(where.split(":", 1)[1]).added:
+                if o.id == oid:
+                    o.support = sup
+        else:
+            scene.variant(where.split(":", 1)[1]).supports[oid] = sup
+
+    def edit_room(self, scene_id: str, fn: Callable[[Room], Room], actor: Actor = "user", note: str = "") -> dict:
+        """Apply a spaces edit (see scene/spaces.py) as one undoable op. Only you can do this."""
+        if actor == "agent":
+            raise PermissionError_("only you can change rooms, spaces and walls")
+        with self._lock:
+            scene = self.load(scene_id)
+            old = scene.room
+            new, mapping = spaces.rewall(old, fn(old.model_copy(deep=True)))
+            new = Room.model_validate(new.model_dump())
+            refs = self._support_refs(scene)
+            before_sup, after_sup = [], []
+            for r in refs:
+                wid = r["support"].removeprefix("wall:")
+                nid = mapping.get(wid) or spaces.wall_for_point(new, r["xy"])
+                target = f"wall:{nid}" if nid else "floor"
+                if target != r["support"]:
+                    before_sup.append({k: r[k] for k in ("where", "id", "support")})
+                    after_sup.append({"where": r["where"], "id": r["id"], "support": target})
+            scene.room = new
+            for item in after_sup:
+                self._restore_support(scene, item)
+            op = Op(actor=actor, kind="room", before={"room": old.model_dump(), "supports": before_sup},
+                    after={"room": new.model_dump(), "supports": after_sup}, note=note)
+            self._commit(scene_id, op, {"room": new.model_dump()})
+            return {"op_id": op.id, "room": new.model_dump(), "violations": [v.model_dump() for v in checks.check_layout(scene)]}
+
     # ---- variants ------------------------------------------------------------
     def create_variant(self, scene_id: str, name: str, base: str = MAIN, actor: Actor = "user", notes: str = "") -> Variant:
         with self._lock:
@@ -443,7 +500,7 @@ class SceneStore:
         return f"{prefix}_{k}"
 
     # ---- undo / redo -----------------------------------------------------------
-    _UNDOABLE = {"move", "add", "hide", "show", "delete", "update", "promote"}
+    _UNDOABLE = {"move", "add", "hide", "show", "delete", "update", "promote", "room"}
 
     def undo(self, scene_id: str, variant: str = MAIN, actor: Actor = "user") -> Op | None:
         with self._lock:
@@ -482,6 +539,11 @@ class SceneStore:
 
     def _apply_state(self, scene: Scene, op: Op, use: Literal["before", "after"]) -> None:
         data = op.before if use == "before" else op.after
+        if op.kind == "room":  # whole-home edit: room plus any wall supports it re-homed
+            scene.room = Room.model_validate(data["room"])
+            for item in data.get("supports", []):
+                self._restore_support(scene, item)
+            return
         if isinstance(data, dict) and "objects" in data:  # multi-object op (move with dependents, promote)
             for item in data["objects"]:
                 self._set_state(scene, op.variant, item["id"], item["state"])

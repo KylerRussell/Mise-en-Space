@@ -122,7 +122,9 @@ def constraint_cost(c: Constraint, objs: dict[str, SceneObject], room: Room) -> 
     return 0.0
 
 
-def hard_energy(objs: dict[str, SceneObject], room: Room, rules, movable: set[str]) -> float:
+def hard_energy(objs: dict[str, SceneObject], room: Room, rules, movable: set[str],
+                regions: dict | None = None) -> float:
+    """Collisions, leaving the floor (or the object's space), cutting through walls, door zones."""
     e = 0.0
     items = [o for o in objs.values() if o.category not in checks.FLOOR_IGNORED]
     fps = {o.id: g.object_footprint(o) for o in items}
@@ -142,9 +144,14 @@ def hard_energy(objs: dict[str, SceneObject], room: Room, rules, movable: set[st
         o = objs[oid]
         if o.category in checks.FLOOR_IGNORED:
             continue
-        out = g.outside_amount(fps[oid], room.floor_polygon)
+        region = (regions or {}).get(oid)
+        out = g.outside_amount_multi(fps[oid], [region.polygon] if region else room.polygons())
         if out > 0:
             e += out + 0.05
+        if len(room.space_list()) > 1:
+            cross = max((g.wall_crossing(fps[oid], w) for w in room.walls), default=0.0)
+            if cross > 0:
+                e += cross + 0.05
         if o.support == "floor":
             for op in room.openings:
                 if op.kind != "door":
@@ -157,7 +164,13 @@ def hard_energy(objs: dict[str, SceneObject], room: Room, rules, movable: set[st
 
 
 def solve_layout(scene: Scene, variant: str, constraints: list[Constraint], movable: list[str] | None = None,
-                 iterations: int = 1500, seed: int = 0, repair_iterations: int = 120) -> SolveResult:
+                 iterations: int = 1500, seed: int = 0, repair_iterations: int = 120,
+                 space: str | None = None) -> SolveResult:
+    """Place the movable objects to satisfy the constraints.
+
+    space: keep every movable object inside this space. Without it, each object stays
+    in the space it stands in now (so nothing wanders through a wall into another room).
+    """
     rng = np.random.default_rng(seed)
     objs = {o.id: o for o in scene.resolve(variant)}
     for c in constraints:
@@ -169,17 +182,28 @@ def solve_layout(scene: Scene, variant: str, constraints: list[Constraint], mova
     if not mov:
         raise ValueError("no movable floor objects (locked or supported objects stay put)")
     room, rules = scene.room, scene.rules
-    poly = np.asarray(room.floor_polygon, float)
-    lo, hi = poly.min(0), poly.max(0)
-    span = float(np.max(hi - lo))
+    fixed = room.space(space) if space else None
+    regions = {m: fixed or room.space_at(objs[m].pose.x, objs[m].pose.y) for m in mov}
+    boxes = {}
+    for m in mov:
+        pl = np.asarray(regions[m].polygon if regions[m] else [p for poly in room.polygons() for p in poly], float)
+        boxes[m] = (pl.min(0), pl.max(0))
+    span = float(max(np.max(hi - lo) for lo, hi in boxes.values()))
+    if fixed:  # start objects that are elsewhere at the space's center
+        c = np.asarray(fixed.polygon, float).mean(0)
+        for m in mov:
+            if room.space_at(objs[m].pose.x, objs[m].pose.y) is not fixed:
+                objs[m].pose.x, objs[m].pose.y = float(c[0]), float(c[1])
 
     def energy() -> tuple[float, float]:
-        h = hard_energy(objs, room, rules, set(mov))
+        h = hard_energy(objs, room, rules, set(mov), regions)
         s = sum(c.weight * constraint_cost(c, objs, room) for c in constraints)
         return HARD_W * h + s, h
 
     def wall_proposal(o: SceneObject) -> tuple[float, float, float]:
-        w = room.walls[rng.integers(len(room.walls))]
+        region = regions.get(o.id)
+        walls = [w for w in room.walls if region is None or w.space in (None, region.id)] or room.walls
+        w = walls[rng.integers(len(walls))]
         n = g.wall_inward_normal(w, room)
         half = o.extent().w / 2
         along = rng.uniform(half, max(half, w.length - half))
@@ -208,8 +232,10 @@ def solve_layout(scene: Scene, variant: str, constraints: list[Constraint], mova
             if m2 != m:
                 o2 = objs[m2]
                 o.pose.x, o.pose.y, o2.pose.x, o2.pose.y = o2.pose.x, o2.pose.y, o.pose.x, o.pose.y
-        o.pose.x = float(np.clip(o.pose.x, lo[0], hi[0]))
-        o.pose.y = float(np.clip(o.pose.y, lo[1], hi[1]))
+        for k in (m, *([m2] if r >= 0.9 and m2 != m else [])):
+            lo, hi = boxes[k]
+            objs[k].pose.x = float(np.clip(objs[k].pose.x, lo[0], hi[0]))
+            objs[k].pose.y = float(np.clip(objs[k].pose.y, lo[1], hi[1]))
         E2, H2 = energy()
         if E2 <= E or rng.random() < math.exp(-(E2 - E) / T):
             E, H = E2, H2

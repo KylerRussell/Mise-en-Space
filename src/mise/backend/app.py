@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..scene import checks, placement, render
+from ..scene import spaces as spaces_mod
 from ..scene.models import MAIN, Dims, LibraryAsset, Pose, Scene, SceneObject, upright_required
 from ..scene.store import PermissionError_, SceneStore
 
@@ -95,6 +96,34 @@ class SolveBody(BaseModel):
     iterations: int = 1500
     seed: int = 0
     apply: bool = True
+    space: str | None = None  # keep movable objects inside this space
+
+
+class SpaceBody(BaseModel):
+    name: str
+    kind: str = "other"
+    polygon: list[tuple[float, float]]
+    ceiling_height: float | None = None
+    open_to: list[str] = []
+
+
+class SpacePatch(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+    ceiling_height: float | None = None
+    open_to: list[str] | None = None
+    polygon: list[tuple[float, float]] | None = None
+
+
+class SplitBody(BaseModel):
+    axis: Literal["x", "y"]
+    at: float
+    new_name: str
+    new_kind: str = "other"
+
+
+class MergeBody(BaseModel):
+    other: str
 
 
 # ---- jobs (Stage 4 imports run in a thread) ----------------------------------------
@@ -200,34 +229,88 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
     def get_scene(scene_id: str):
         return scene_or_404(scene_id).model_dump()
 
+    def space_of(room, o) -> str | None:
+        sp = room.space_at(o.pose.x, o.pose.y)
+        return sp.id if sp else None
+
     @app.get("/api/scenes/{scene_id}/room")
     def get_room(scene_id: str, variant: str = MAIN):
         from ..scene import geometry as g
+        import numpy as np
         s = scene_or_404(scene_id)
         variant_ok(s, variant)
         objs = s.resolve(variant)
         floor_objs = [o for o in objs if o.support == "floor" and o.category not in checks.FLOOR_IGNORED]
-        # free area approximated by footprint union on a grid
-        import numpy as np
-        poly = np.asarray(s.room.floor_polygon)
-        lo, hi = poly.min(0), poly.max(0)
+        # free area per space, approximated by footprint union on a grid
         step = 0.05
-        xs, ys = np.meshgrid(np.arange(lo[0] + step / 2, hi[0], step), np.arange(lo[1] + step / 2, hi[1], step))
+        (lx, ly), (hx, hy) = s.room.bounds()
+        xs, ys = np.meshgrid(np.arange(lx + step / 2, hx, step), np.arange(ly + step / 2, hy, step))
         pts = np.c_[xs.ravel(), ys.ravel()]
-        inside = g.points_in_polygon(pts, poly)
         occ = np.zeros(len(pts), bool)
         for o in floor_objs:
             occ |= g.points_in_polygon(pts, g.object_footprint(o))
-        free = float((inside & ~occ).sum() * step * step)
+        spaces_out, free_total = [], 0.0
+        for sp in s.room.space_list():
+            inside = g.points_in_polygon(pts, np.asarray(sp.polygon))
+            free = float((inside & ~occ).sum() * step * step)
+            free_total += free
+            spaces_out.append({**sp.model_dump(), "area_m2": round(sp.area(), 2), "free_area_m2": round(free, 2),
+                               "ceiling": s.room.ceiling_for(sp), "explicit": bool(s.room.spaces),
+                               "open_with": [o.id for o in s.room.space_list() if o.id != sp.id and s.room.is_open(sp.id, o.id)],
+                               "objects": [o.id for o in objs if space_of(s.room, o) == sp.id]})
         return {
-            "floor_polygon": s.room.floor_polygon, "floor_area_m2": round(s.room.floor_area(), 3),
-            "free_floor_area_m2": round(free, 2), "ceiling_height": s.room.ceiling_height,
-            "bounds": {"min": lo.tolist(), "max": hi.tolist()},
+            "floor_polygon": s.room.floor_polygon, "floor_polygons": s.room.polygons(),
+            "floor_area_m2": round(s.room.floor_area(), 3),
+            "free_floor_area_m2": round(free_total, 2), "ceiling_height": s.room.ceiling_height,
+            "bounds": {"min": [lx, ly], "max": [hx, hy]},
+            "spaces": spaces_out,
             "walls": [{**w.model_dump(), "length": round(w.length, 3),
                        "inward_normal": [round(float(v), 4) for v in g.wall_inward_normal(w, s.room)]} for w in s.room.walls],
             "openings": [{**o.model_dump(), "polygon": g.opening_polygon(o, s.room)} for o in s.room.openings],
             "rules": s.rules.model_dump(),
         }
+
+    # ---- spaces (rooms and zones); only you can edit them -----------------------------
+    @app.post("/api/scenes/{scene_id}/spaces")
+    def add_space(scene_id: str, body: SpaceBody, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        made = {}
+
+        def fn(r):
+            r, made["id"] = spaces_mod.add_space(r, body.name, body.kind, body.polygon, body.ceiling_height, body.open_to)
+            return r
+        out = guard(store.edit_room, scene_id, fn, actor_of(x_actor), f"add space {body.name}")
+        return {**out, "space_id": made["id"]}
+
+    @app.patch("/api/scenes/{scene_id}/spaces/{space_id}")
+    def update_space(scene_id: str, space_id: str, body: SpacePatch, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        fields = body.model_dump(exclude_unset=True)
+        return guard(store.edit_room, scene_id, lambda r: spaces_mod.update_space(r, space_id, **fields),
+                     actor_of(x_actor), f"update space {space_id}")
+
+    @app.post("/api/scenes/{scene_id}/spaces/{space_id}/split")
+    def split_space(scene_id: str, space_id: str, body: SplitBody, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        made = {}
+
+        def fn(r):
+            r, made["id"] = spaces_mod.split_space(r, space_id, body.axis, body.at, body.new_name, body.new_kind)
+            return r
+        out = guard(store.edit_room, scene_id, fn, actor_of(x_actor), f"split {space_id} at {body.axis}={body.at}")
+        return {**out, "space_id": made["id"]}
+
+    @app.post("/api/scenes/{scene_id}/spaces/{space_id}/merge")
+    def merge_space(scene_id: str, space_id: str, body: MergeBody, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        return guard(store.edit_room, scene_id, lambda r: spaces_mod.merge_spaces(r, space_id, body.other),
+                     actor_of(x_actor), f"merge {body.other} into {space_id}")
+
+    @app.delete("/api/scenes/{scene_id}/spaces/{space_id}")
+    def delete_space(scene_id: str, space_id: str, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        return guard(store.edit_room, scene_id, lambda r: spaces_mod.delete_space(r, space_id),
+                     actor_of(x_actor), f"delete space {space_id}")
 
     @app.get("/api/scenes/{scene_id}/variants")
     def list_variants(scene_id: str):
@@ -248,13 +331,16 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         return {"deleted": variant}
 
     @app.get("/api/scenes/{scene_id}/variants/{variant}/objects")
-    def list_objects(scene_id: str, variant: str, include_hidden: bool = False):
+    def list_objects(scene_id: str, variant: str, include_hidden: bool = False, space: str | None = None):
         s = scene_or_404(scene_id)
         variant_ok(s, variant)
+        if space:
+            guard(s.room.space, space)
         objs = s.resolve(variant, include_hidden=include_hidden)
         hidden = set(s.variant(variant).hidden) if variant != MAIN else set()
-        return [{**o.model_dump(), "label": i + 1, "hidden": o.id in hidden, "extent": o.extent().model_dump(),
-                 "upright_required": o.upright_required} for i, o in enumerate(objs)]
+        out = [{**o.model_dump(), "label": i + 1, "hidden": o.id in hidden, "extent": o.extent().model_dump(),
+                "upright_required": o.upright_required, "space": space_of(s.room, o)} for i, o in enumerate(objs)]
+        return [o for o in out if not space or o["space"] == space]
 
     # ---- edits ---------------------------------------------------------------------------
     @app.post("/api/scenes/{scene_id}/variants/{variant}/objects/{object_id}/move")
@@ -336,24 +422,28 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
 
     # ---- checks, renders, diffs ---------------------------------------------------------
     @app.get("/api/scenes/{scene_id}/variants/{variant}/check")
-    def check(scene_id: str, variant: str):
+    def check(scene_id: str, variant: str, space: str | None = None):
         s = scene_or_404(scene_id)
         variant_ok(s, variant)
         vs = checks.check_layout(s, variant)
+        if space:
+            guard(s.room.space, space)
+            ids = {o.id for o in s.resolve(variant) if space_of(s.room, o) == space}
+            vs = [v for v in vs if (set(v.objects) & ids) or v.kind == "walkway"]
         return {"hard": sum(v.severity == "hard" for v in vs), "soft": sum(v.severity == "soft" for v in vs),
                 "violations": [v.model_dump() for v in vs]}
 
     @app.get("/api/scenes/{scene_id}/variants/{variant}/render")
     def render_png(scene_id: str, variant: str, view: Literal["plan", "eye", "object"] = "plan",
                    object_id: str | None = None, eye: str | None = None, target: str | None = None,
-                   labels_header: bool = True):
+                   labels_header: bool = True, space: str | None = None):
         s = scene_or_404(scene_id)
         variant_ok(s, variant)
         objs = s.resolve(variant)
         e = tuple(map(float, eye.split(","))) if eye else None
         t = tuple(map(float, target.split(","))) if target else None
         png, labels = guard(render.render_view, s.room, objs, view, checks.check_objects(s.room, objs, s.rules),
-                            object_id, e, t)
+                            object_id, e, t, space)
         headers = {"X-Label-Map": json.dumps(labels)} if labels_header else {}
         return Response(png, media_type="image/png", headers=headers)
 
@@ -374,7 +464,7 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         if body.apply and actor == "agent" and variant == MAIN:
             raise HTTPException(403, "the AI writes only to variants; call create_variant first")
         cons = [guard(Constraint.model_validate, c) for c in body.constraints]
-        res = guard(solve_layout, s, variant, cons, body.movable, body.iterations, body.seed)
+        res = guard(solve_layout, s, variant, cons, body.movable, body.iterations, body.seed, space=body.space)
         if body.apply:
             for oid, pose in res.poses.items():
                 guard(store.move, scene_id, variant, oid, x=pose.x, y=pose.y, yaw=pose.yaw, snap=False, actor=actor)
