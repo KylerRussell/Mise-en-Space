@@ -95,3 +95,16 @@ def test_decompose_package(tmp_path):
     assert np.isclose(o.pose.x, 2, atol=0.03) and np.isclose(o.dims.w, 1.2, atol=0.03)
     canon = ply.read_ply(tmp_path / "out/objects/desk_1.ply").xyz
     assert np.allclose(np.ptp(canon[:, :2], axis=0), [1.2, 0.6], atol=0.03)
+
+
+def test_scale_from_reference_box():
+    # a 1 ft x 1.5 ft x 1 ft box, rotated 25°, in model units where 1 unit = 0.4 m, with noise and an outlier
+    rng = np.random.default_rng(3)
+    w, d, h = 0.4572 / 0.4, 0.3048 / 0.4, 0.3048 / 0.4
+    top = np.c_[rng.uniform(-w / 2, w / 2, 300), rng.uniform(-d / 2, d / 2, 300), np.full(300, h)]
+    side = np.c_[rng.uniform(-w / 2, w / 2, 150), np.full(150, -d / 2), rng.uniform(0, h, 150)]
+    pts = np.vstack([top, side]) @ ply.rot_z(25).T + [2.0, 1.0, 0] + rng.normal(0, 0.003, (450, 3))
+    pts = np.vstack([pts, [[9, 9, 0.5]]])
+    pts = scale.largest_cluster(pts, radius=0.3)
+    ref = scale.scale_from_reference(pts, known_m=0.3048, trim=1.0)
+    assert abs(ref.scale - 0.4) / 0.4 < 0.03

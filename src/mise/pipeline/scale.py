@@ -154,3 +154,85 @@ def read_colmap_text(sparse_dir: str | Path) -> dict[str, Camera]:
         t = np.array(list(map(float, p[5:8])))
         cams[p[9]] = Camera(K=Ks[int(p[8])], R=qvec_to_R(q), t=t)
     return cams
+
+
+# ---- reference object (no printed markers) ------------------------------------------
+
+@dataclass
+class ReferenceScale:
+    """Scale from an object of known size seen in the capture (e.g. a box 1 ft wide).
+
+    Weaker than markers: one object, a footprint fitted to sparse points, so expect a
+    few percent of error. Held-out tape distances still decide whether it is good enough.
+    """
+
+    known_m: float
+    measured_model: float  # the matching side in model units
+    scale: float  # meters per model unit
+    long_side_model: float
+    height_model: float
+    n_points: int
+    footprint_model: list[list[float]] = field(default_factory=list)
+
+
+def points_on_reference(rec, frames_dir: str | Path, mask_fn, min_votes: int = 2) -> np.ndarray:
+    """3D points (model frame) whose observations fall inside `mask_fn(image_bgr) -> bool HxW` in >= min_votes frames."""
+    import cv2
+
+    votes: dict[int, int] = {}
+    seen: dict[int, int] = {}
+    for img in rec.images.values():
+        bgr = cv2.imread(str(Path(frames_dir) / img.name))
+        if bgr is None:
+            continue
+        m = mask_fn(bgr)
+        if not m.any():
+            continue
+        h, w = m.shape
+        for p2 in img.points2D:
+            if not p2.has_point3D():
+                continue
+            x, y = int(round(p2.xy[0])), int(round(p2.xy[1]))
+            pid = int(p2.point3D_id)
+            seen[pid] = seen.get(pid, 0) + 1
+            if 0 <= x < w and 0 <= y < h and m[y, x]:
+                votes[pid] = votes.get(pid, 0) + 1
+    ids = [pid for pid, v in votes.items() if v >= min_votes and v >= 0.5 * seen[pid]]
+    return np.array([rec.points3D[pid].xyz for pid in ids]) if ids else np.zeros((0, 3))
+
+
+def largest_cluster(pts: np.ndarray, radius: float) -> np.ndarray:
+    """Keep the biggest connected cluster (points within `radius` of each other)."""
+    if len(pts) < 3:
+        return pts
+    d = np.linalg.norm(pts[:, None] - pts[None], axis=2)
+    lab = -np.ones(len(pts), int)
+    cur = 0
+    for i in range(len(pts)):
+        if lab[i] >= 0:
+            continue
+        stack = [i]
+        lab[i] = cur
+        while stack:
+            j = stack.pop()
+            for k in np.nonzero((d[j] < radius) & (lab < 0))[0]:
+                lab[k] = cur
+                stack.append(k)
+        cur += 1
+    big = np.bincount(lab).argmax()
+    return pts[lab == big]
+
+
+def scale_from_reference(points_zup: np.ndarray, known_m: float, side: str = "short", trim: float = 5.0) -> ReferenceScale:
+    """points_zup: the object's points in a leveled frame (floor at z = 0, z up), any units."""
+    from ..scene.geometry import convex_hull, min_area_rect
+
+    p = np.asarray(points_zup, float)
+    lo, hi = np.percentile(p, trim, axis=0), np.percentile(p, 100 - trim, axis=0)
+    p = p[np.all((p >= lo) & (p <= hi), axis=1)]
+    center, w, d, yaw = min_area_rect(p[:, :2])
+    meas = d if side == "short" else w
+    s = known_m / meas
+    hull = convex_hull(p[:, :2])
+    return ReferenceScale(known_m=known_m, measured_model=float(meas), scale=float(s), long_side_model=float(w),
+                          height_model=float(p[:, 2].max()), n_points=len(p), footprint_model=hull.tolist())
