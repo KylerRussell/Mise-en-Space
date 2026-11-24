@@ -154,9 +154,26 @@ def height_passes(centers_z: np.ndarray, bin_m: float = 0.15) -> tuple[int, floa
     return len(merged), span
 
 
+def enhance_frames(src: Path, dst: Path, clip: float = 3.0, tiles: int = 8) -> None:
+    """Local contrast boost (CLAHE on lightness) so dim, plain walls yield more features."""
+    import cv2
+
+    dst.mkdir(parents=True, exist_ok=True)
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tiles, tiles))
+    for p in sorted(src.glob("*.jpg")):
+        lab = cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2LAB)
+        lab[..., 0] = clahe.apply(lab[..., 0])
+        cv2.imwrite(str(dst / p.name), cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+
 def solve_poses(frames_dir: Path, work_dir: Path, max_image_size: int = 1600, max_features: int = 4096,
-                overlap: int = 10, num_threads: int = -1):
-    """SIFT + sequential matching + incremental mapping on CPU. Returns the largest reconstruction."""
+                overlap: int = 10, num_threads: int = -1, peak_threshold: float | None = None,
+                low_texture: bool = False):
+    """SIFT + sequential matching + incremental mapping on CPU. Returns the largest reconstruction.
+
+    low_texture: looser registration for plain walls and dim rooms (more matches tried,
+    lower inlier minimums). Check the reprojection error and held-out distances after.
+    """
     import pycolmap
 
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -166,6 +183,8 @@ def solve_poses(frames_dir: Path, work_dir: Path, max_image_size: int = 1600, ma
     ext = pycolmap.FeatureExtractionOptions()
     ext.max_image_size = max_image_size
     ext.sift.max_num_features = max_features
+    if peak_threshold is not None:
+        ext.sift.peak_threshold = peak_threshold
     ext.num_threads = num_threads
     reader = pycolmap.ImageReaderOptions()
     reader.camera_model = "OPENCV"  # phone lenses: estimate k1, k2, p1, p2
@@ -179,6 +198,12 @@ def solve_poses(frames_dir: Path, work_dir: Path, max_image_size: int = 1600, ma
     pycolmap.match_sequential(db, matching_options=match, pairing_options=pair, device=pycolmap.Device.cpu)
     opts = pycolmap.IncrementalPipelineOptions()
     opts.num_threads = num_threads
+    if low_texture:
+        opts.min_num_matches = 10
+        opts.mapper.init_min_num_inliers = 50
+        opts.mapper.abs_pose_min_num_inliers = 15
+        opts.mapper.abs_pose_min_inlier_ratio = 0.15
+        opts.mapper.max_reg_trials = 6
     recs = pycolmap.incremental_mapping(db, frames_dir, work_dir / "sparse", options=opts)
     if not recs:
         raise RuntimeError("pose solving failed: no reconstruction")
