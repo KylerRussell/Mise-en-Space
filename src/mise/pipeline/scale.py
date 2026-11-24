@@ -236,3 +236,99 @@ def scale_from_reference(points_zup: np.ndarray, known_m: float, side: str = "sh
     hull = convex_hull(p[:, :2])
     return ReferenceScale(known_m=known_m, measured_model=float(meas), scale=float(s), long_side_model=float(w),
                           height_model=float(p[:, 2].max()), n_points=len(p), footprint_model=hull.tolist())
+
+
+# ---- reference box from clicked rim corners ----------------------------------------------
+
+CORNERS = ("FL", "FR", "BR", "BL")  # front-left, front-right, back-right, back-left, going around the rim
+_SIGNS = {"FL": (-1, -1), "FR": (1, -1), "BR": (1, 1), "BL": (-1, 1)}
+
+
+@dataclass
+class LevelRect:
+    """A horizontal rectangle (e.g. a box's top rim) fitted to clicked corners, in the leveled frame."""
+
+    center: tuple[float, float]
+    height: float  # above the floor, model units
+    yaw_deg: float
+    long_side: float  # FL->FR, model units
+    short_side: float  # FR->BR, model units
+    rms_px: float
+    short_side_rel_sigma: float  # 1-sigma relative uncertainty of short_side
+    n_obs: int
+
+    def scale_for(self, known_m: float, side: str = "short") -> float:
+        return known_m / (self.short_side if side == "short" else self.long_side)
+
+
+def _rect_corners(q: np.ndarray) -> dict[str, np.ndarray]:
+    cx, cy, h, yaw, a, b = q
+    c, s = np.cos(yaw), np.sin(yaw)
+    return {k: np.array([cx + c * sx * a / 2 - s * sy * b / 2, cy + s * sx * a / 2 + c * sy * b / 2, h])
+            for k, (sx, sy) in _SIGNS.items()}
+
+
+def fit_level_rectangle(cams: dict[str, Camera], clicks: dict[str, dict[str, tuple[float, float]]],
+                        level_R: np.ndarray, level_t: np.ndarray, iters: int = 50, huber_px: float = 3.0) -> LevelRect:
+    """Fit a level rectangle to corner clicks seen from posed cameras.
+
+    clicks: frame -> {corner name (FL/FR/BR/BL) -> undistorted pixel}. Each corner should be
+    clicked in 2+ frames, and FL->FR must be a long side. level_R, level_t map model
+    coordinates to the leveled frame (floor z = 0, z up): p_level = level_R @ p + level_t.
+    Assuming the rim is level and square-cornered removes most of the depth error that
+    short-baseline triangulation of single corners suffers from.
+    """
+    obs = [(cams[f], k, np.asarray(uv, float)) for f, cs in clicks.items() if f in cams for k, uv in cs.items()]
+    if len(obs) < 6:
+        raise ValueError("need at least 6 corner clicks")
+    Rinv = level_R.T
+
+    def residuals(q):
+        cs = _rect_corners(q)
+        r = []
+        for cam, k, uv in obs:
+            X = Rinv @ (cs[k] - level_t)
+            h = cam.P @ np.r_[X, 1.0]
+            r.extend(h[:2] / h[2] - uv)
+        return np.asarray(r)
+
+    # init: triangulate each corner that has 2+ views, then read the rectangle off them
+    pts = {}
+    for k in CORNERS:
+        o = [(c, uv) for c, kk, uv in obs if kk == k]
+        if len(o) >= 2:
+            pts[k] = level_R @ triangulate([c for c, _ in o], [uv for _, uv in o]) + level_t
+    if not {"FL", "FR"} <= set(pts) or len(pts) < 3:
+        raise ValueError("need FL, FR and one more corner each clicked in 2+ frames")
+    ctr = np.mean(list(pts.values()), axis=0)
+    v = pts["FR"] - pts["FL"]
+    a0 = np.linalg.norm(v[:2])
+    other = pts.get("BR", pts.get("BL"))
+    b0 = np.linalg.norm((other - (pts["FR"] if "BR" in pts else pts["FL"]))[:2])
+    q = np.array([ctr[0], ctr[1], ctr[2], np.arctan2(v[1], v[0]), a0, b0])
+    # robust Gauss-Newton (IRLS with Huber weights), numeric Jacobian
+    for _ in range(iters):
+        r = residuals(q)
+        J = np.empty((len(r), 6))
+        for j in range(6):
+            dq = np.zeros(6)
+            dq[j] = 1e-6 * max(1.0, abs(q[j]))
+            J[:, j] = (residuals(q + dq) - r) / dq[j]
+        e = np.linalg.norm(r.reshape(-1, 2), axis=1)
+        w = np.repeat(np.where(e <= huber_px, 1.0, huber_px / np.maximum(e, 1e-9)), 2)
+        A = J.T @ (J * w[:, None])
+        step = np.linalg.lstsq(A + 1e-9 * np.eye(6), -J.T @ (w * r), rcond=None)[0]
+        q = q + step
+        if np.linalg.norm(step) < 1e-10 * (1 + np.linalg.norm(q)):
+            break
+    r = residuals(q)
+    e = np.linalg.norm(r.reshape(-1, 2), axis=1)
+    sigma = float(np.median(e)) or 1e-3
+    cov = np.linalg.pinv(J.T @ J) * sigma ** 2
+    if q[4] < 0:
+        q[4] = -q[4]
+    if q[5] < 0:
+        q[5] = -q[5]
+    return LevelRect(center=(float(q[0]), float(q[1])), height=float(q[2]), yaw_deg=float(np.degrees(q[3])),
+                     long_side=float(q[4]), short_side=float(q[5]), rms_px=float(np.sqrt(np.mean(e ** 2))),
+                     short_side_rel_sigma=float(np.sqrt(max(cov[5, 5], 0)) / abs(q[5])), n_obs=len(obs))

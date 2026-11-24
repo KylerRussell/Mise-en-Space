@@ -108,3 +108,37 @@ def test_scale_from_reference_box():
     pts = scale.largest_cluster(pts, radius=0.3)
     ref = scale.scale_from_reference(pts, known_m=0.3048, trim=1.0)
     assert abs(ref.scale - 0.4) / 0.4 < 0.03
+
+
+def test_fit_level_rectangle_from_clicked_corners():
+    # a 0.476 x 0.305 rim 0.28 above the floor, in model units of 0.5 m, seen from three nearby cameras
+    rng = np.random.default_rng(1)
+    k = 0.5
+    level_R, level_t = ply.rot_z(15), np.array([0.3, -0.2, 0.1])  # model -> leveled
+    rect_m = dict(cx=1.0, cy=2.0, h=0.28, yaw=np.radians(30), a=0.476, b=0.305)
+    q = np.array([rect_m["cx"], rect_m["cy"], rect_m["h"], rect_m["yaw"], rect_m["a"], rect_m["b"]]) / [k, k, k, 1, k, k]
+    corners_level = scale._rect_corners(q)
+    K = np.array([[1300, 0, 800], [0, 1300, 450], [0, 0, 1.0]])
+    cams, clicks = {}, {}
+    for i, C_m in enumerate([(0.2, 1.2, 1.5), (0.5, 1.0, 1.4), (1.6, 1.1, 1.5)]):
+        C = level_R.T @ (np.array(C_m) / k - level_t)  # camera center in model frame
+        target = level_R.T @ (np.array([rect_m["cx"], rect_m["cy"], 0.0]) / k - level_t)
+        f = target - C
+        f /= np.linalg.norm(f)
+        up_model = level_R.T @ np.array([0, 0, 1.0])
+        x = np.cross(f, up_model)
+        x /= np.linalg.norm(x)
+        y = np.cross(f, x)
+        R = np.vstack([x, y, f])
+        cam = scale.Camera(K=K, R=R, t=-R @ C)
+        cams[f"f{i}"] = cam
+        clicks[f"f{i}"] = {}
+        for name, Xl in corners_level.items():
+            h = cam.P @ np.r_[level_R.T @ (Xl - level_t), 1]
+            clicks[f"f{i}"][name] = h[:2] / h[2] + rng.normal(0, 1.0, 2)
+    del clicks["f2"]["BL"]
+    clicks["f0"]["FR"] = clicks["f0"]["FR"] + [15, 0]  # one bad click
+    rect = scale.fit_level_rectangle(cams, clicks, level_R, level_t)
+    s = rect.scale_for(0.3048)
+    assert abs(s - k) / k < 0.03
+    assert abs(rect.long_side * s - 0.476) < 0.02 and abs(rect.height * s - 0.28) < 0.02
