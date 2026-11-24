@@ -5,6 +5,7 @@ import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import { extentOf, footprint, inAny, liveConflicts } from "./geometry.js";
+import { EXTERIOR, doorLeaves, entryDoor, wallPieces } from "./walls3d.js";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 const EYE = 1.6;
@@ -34,8 +35,9 @@ export class Viewport {
     this.scene.background = new THREE.Color(getComputedStyle(document.body).getPropertyValue("--canvas").trim() || "#ece9e2");
     this.spark = new SparkRenderer({ renderer: this.renderer });
     this.scene.add(this.spark);
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7f70, 1.6));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    // soft, even interior light (physical intensities: ~pi gives surfaces their own color)
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xd9d2c5, 3.0));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
     sun.position.set(3, -2, 6);
     this.scene.add(sun);
 
@@ -96,10 +98,14 @@ export class Viewport {
     const polys = room.floor_polygons || [room.floor_polygon];
     this.polys = polys;
     this.floors = [];
-    for (const poly of polys) {
+    this.wallMeshes = [];
+    const spaces = room.spaces || [];
+    const finishOf = (id) => (spaces.find((s) => s.id === id) || {}).finish || {};
+    // floors: one per space, in its finish (texture UVs are meters: the shape is in world x, y)
+    const floorShapes = spaces.length ? spaces.map((s) => [s.polygon, s.finish?.floor]) : polys.map((p) => [p, null]);
+    for (const [poly, surf] of floorShapes) {
       const shape = new THREE.Shape(poly.map(([x, y]) => new THREE.Vector2(x, y)));
-      const floor = new THREE.Mesh(new THREE.ShapeGeometry(shape),
-        new THREE.MeshStandardMaterial({ color: 0xd8ccb6, roughness: 0.9, transparent: !!room.splat, opacity: room.splat ? 0.0 : 1 }));
+      const floor = new THREE.Mesh(new THREE.ShapeGeometry(shape), this._surface(surf, "#d8ccb6", { transparent: !!room.splat, opacity: room.splat ? 0 : 1 }));
       floor.name = "floor";
       this.roomGroup.add(floor);
       this.floors.push(floor);
@@ -108,32 +114,78 @@ export class Viewport {
       const dash = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
         new THREE.LineDashedMaterial({ color: 0x8a8070, dashSize: 0.12, gapSize: 0.08 }));
       dash.computeLineDistances();
+      dash.userData.planOnly = true;
       this.roomGroup.add(dash);
     }
-    const spaces = room.spaces || [];
     if (spaces.length > 1) {
       for (const sp of spaces) {
         const xs = sp.polygon.map((p) => p[0]), ys = sp.polygon.map((p) => p[1]);
         const tag = this._label(`${sp.name} · ${sp.area_m2.toFixed(1)} m²`, "space-label");
         tag.element.dataset.space = sp.id;
         tag.position.set((Math.min(...xs) + Math.max(...xs)) / 2, Math.max(...ys) - 0.35, 0.02); // top edge, clear of most furniture
+        tag.userData.notWalk = true;
         this.roomGroup.add(tag);
       }
+      // ceilings, seen only when you walk around inside
+      for (const sp of spaces) {
+        const shape = new THREE.Shape(sp.polygon.map(([x, y]) => new THREE.Vector2(x, y)));
+        const ceil = new THREE.Mesh(new THREE.ShapeGeometry(shape), this._surface(sp.finish?.ceiling, "#f2f0eb", { side: THREE.DoubleSide }));
+        ceil.position.z = sp.ceiling || room.ceiling_height;
+        ceil.userData.walkOnly = true;
+        this.roomGroup.add(ceil);
+      }
     }
-    const H = room.ceiling_height;
+    // solid walls with the openings cut through, in each space's wall finish
+    const wallMats = new Map();
+    const matsFor = (spaceId, fullHeight) => {
+      // the cut top of a full-height wall reads dark from above (as on a plan); door heads and sills show the finish
+      const key = `${spaceId}|${fullHeight}`;
+      if (!wallMats.has(key)) {
+        const face = this._surface(finishOf(spaceId).walls, "#f4f1ea");
+        const top = fullHeight ? new THREE.MeshStandardMaterial({ color: 0x6b665e, roughness: 1 }) : face;
+        const solid = [face, face, face, face, top, face];
+        const faded = solid.map((m) => Object.assign(m.clone(), { transparent: true, opacity: 0.12, depthWrite: false }));
+        wallMats.set(key, { solid, faded });
+      }
+      return wallMats.get(key);
+    };
+    const trim = new THREE.MeshStandardMaterial({ color: 0xe8e5de, roughness: 0.6 });
+    for (const pc of wallPieces(room)) {
+      const len = pc.s1 - pc.s0, h = pc.z1 - pc.z0;
+      if (len < 0.005 || h < 0.005) continue;
+      const geo = new THREE.BoxGeometry(len, pc.thick, h);
+      // UVs in meters (so textures keep their real size) and continuous along the wall
+      const uv = geo.attributes.uv, dims = [[h, pc.thick], [h, pc.thick], [len, h], [len, h], [len, pc.thick], [len, pc.thick]];
+      dims.forEach(([du, dv], f) => {
+        for (let k = f * 4; k < f * 4 + 4; k++) {
+          const off = f === 2 || f === 3 ? [pc.s0, pc.z0] : [0, 0];
+          uv.setXY(k, uv.getX(k) * du + off[0], uv.getY(k) * dv + off[1]);
+        }
+      });
+      const mats = matsFor(pc.space, pc.z1 >= (room.walls.find((w) => w.id === pc.wall)?.height || room.ceiling_height) - 1e-3);
+      const mesh = new THREE.Mesh(geo, room.splat ? mats.faded : mats.solid);
+      const mid = (pc.s0 + pc.s1) / 2;
+      const cx = pc.a[0] + pc.u[0] * mid - pc.n[0] * pc.thick / 2, cy = pc.a[1] + pc.u[1] * mid - pc.n[1] * pc.thick / 2;
+      mesh.position.set(cx, cy, (pc.z0 + pc.z1) / 2);
+      mesh.rotation.z = Math.atan2(pc.u[1], pc.u[0]);
+      mesh.userData.wall = { out: [-pc.n[0], -pc.n[1]], c: [cx, cy], mats };
+      mesh.userData.notPlan = pc.z0 > 1e-3; // plans are cut below door height: openings show as gaps
+      this.roomGroup.add(mesh);
+      this.wallMeshes.push(mesh);
+      // baseboard along the room-side face
+      const b0 = Math.max(pc.s0, 0), b1 = Math.min(pc.s1, pc.wallLen);
+      if (pc.z0 < 1e-3 && b1 - b0 > 0.02 && !room.splat) {
+        const bb = new THREE.Mesh(new THREE.BoxGeometry(b1 - b0, 0.012, 0.09), trim);
+        const bm = (b0 + b1) / 2;
+        bb.position.set(pc.a[0] + pc.u[0] * bm + pc.n[0] * 0.006, pc.a[1] + pc.u[1] * bm + pc.n[1] * 0.006, 0.045);
+        bb.rotation.z = mesh.rotation.z;
+        bb.userData.notPlan = true;
+        this.roomGroup.add(bb);
+      }
+    }
     for (const w of room.walls) {
       const [ax, ay] = w.a, [bx, by] = w.b;
       const len = Math.hypot(bx - ax, by - ay);
-      const wh = w.height || H;
-      const wall = new THREE.Mesh(new THREE.PlaneGeometry(len, wh),
-        new THREE.MeshStandardMaterial({ color: 0xf4f1ea, side: THREE.BackSide, transparent: true, opacity: room.splat ? 0 : 0.85 }));
-      wall.position.set((ax + bx) / 2, (ay + by) / 2, wh / 2);
-      // Plane normal ends up (sin a, -cos a); point it outward so BackSide hides walls between you and the room.
-      let ang = Math.atan2(by - ay, bx - ax);
-      const n0 = w.inward_normal || [0, 1];
-      if (Math.sin(ang) * n0[0] - Math.cos(ang) * n0[1] > 0) ang += Math.PI;
-      wall.rotation.set(Math.PI / 2, 0, ang, "ZXY");
-      this.roomGroup.add(wall);
       const edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(ax, ay, 0.004), new THREE.Vector3(bx, by, 0.004)]),
         new THREE.LineBasicMaterial({ color: 0x333333 }));
       this.roomGroup.add(edge);
@@ -143,22 +195,44 @@ export class Viewport {
       tag.userData.planOnly = true;
       this.roomGroup.add(tag);
     }
-    // doorways you can walk through between rooms (the gap a wall's thickness leaves)
+    // door leaves, open, and the doorways you can walk through between rooms
+    for (const lf of doorLeaves(room)) {
+      const leaf = new THREE.Mesh(new THREE.BoxGeometry(lf.width, lf.thick, lf.height),
+        new THREE.MeshStandardMaterial({ color: lf.kind === "slide" ? 0x5d5953 : 0xeceae4, roughness: 0.55 }));
+      leaf.position.set(lf.cx, lf.cy, lf.height / 2);
+      leaf.rotation.z = lf.angle;
+      leaf.userData.notPlan = true;
+      this.roomGroup.add(leaf);
+    }
     this.doorways = [];
     for (const op of room.openings) {
       const pts = op.polygon.map(([x, y, z]) => new THREE.Vector3(x, y, z));
       const color = op.kind === "window" ? 0x3c82c8 : 0xb46e28;
-      this.roomGroup.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color })));
+      const loop = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color }));
+      loop.userData.planOnly = op.kind !== "window";
+      this.roomGroup.add(loop);
       const base = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(pts[0].x, pts[0].y, 0.004), new THREE.Vector3(pts[1].x, pts[1].y, 0.004)]),
         new THREE.LineBasicMaterial({ color, linewidth: 3 }));
+      base.userData.planOnly = true;
       this.roomGroup.add(base);
       const tag = this._label(op.id.replace("_", " "), "op-label");
       tag.position.set((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2, op.kind === "window" ? op.top : 0.05);
+      tag.userData.planOnly = true;
       this.roomGroup.add(tag);
       if (op.kind === "door") {
-        const n = (room.walls.find((w) => w.id === op.wall) || {}).inward_normal || [0, 0];
+        const w = room.walls.find((x) => x.id === op.wall) || {};
+        const n = w.inward_normal || [0, 0];
         const [x0, y0] = [pts[0].x, pts[0].y], [x1, y1] = [pts[1].x, pts[1].y], d = 0.4;
-        this.doorways.push([[x0 - n[0] * d, y0 - n[1] * d], [x1 - n[0] * d, y1 - n[1] * d], [x1 + n[0] * d, y1 + n[1] * d], [x0 + n[0] * d, y0 + n[1] * d]]);
+        // into the next room, or (outside doors) only across the wall's thickness
+        const mid = [(x0 + x1) / 2 - n[0] * d, (y0 + y1) / 2 - n[1] * d];
+        const dOut = inAny(mid, polys) ? d : EXTERIOR;
+        const rect = [[x0 - n[0] * dOut, y0 - n[1] * dOut], [x1 - n[0] * dOut, y1 - n[1] * dOut], [x1 + n[0] * d, y1 + n[1] * d], [x0 + n[0] * d, y0 + n[1] * d]];
+        this.doorways.push(rect);
+        // threshold: floor across the wall's thickness, under the room floors elsewhere
+        const sill = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(rect.map(([x, y]) => new THREE.Vector2(x, y)))),
+          this._surface(finishOf(w.space).floor, "#d8ccb6"));
+        sill.position.z = -0.002;
+        this.roomGroup.add(sill);
       }
     }
     if (room.splat) {
@@ -193,6 +267,26 @@ export class Viewport {
     this.ortho.position.set(cx, cy, 30);
     this.ortho.lookAt(cx, cy, 0);
     this.ortho.updateProjectionMatrix();
+  }
+
+  /** A material for a floor, wall or ceiling finish: { color, texture, size_m } (texture in meters). */
+  _surface(surf, fallback, extra = {}) {
+    const opts = { color: surf?.color || fallback, roughness: 0.92, ...extra };
+    if (surf?.texture && this.sceneId) {
+      this._textures = this._textures || new Map();
+      const key = `${this.sceneId}/${surf.texture}@${surf.size_m || 1}`;
+      if (!this._textures.has(key)) {
+        const t = new THREE.TextureLoader().load(this.fileUrl(this.sceneId, surf.texture));
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.anisotropy = 8;
+        t.repeat.set(1 / (surf.size_m || 1), 1 / (surf.size_m || 1));
+        this._textures.set(key, t);
+      }
+      opts.map = this._textures.get(key);
+      opts.color = 0xffffff; // the texture carries the color
+    }
+    return new THREE.MeshStandardMaterial(opts);
   }
 
   _label(text, cls) {
@@ -307,16 +401,14 @@ export class Viewport {
       // Start in the first doorway looking at the room's center, as you would walk in.
       const { minX, maxX, minY, maxY } = this.bounds;
       const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-      const door = this.room.openings.find((o) => o.kind === "door");
-      const wall = door && this.room.walls.find((w) => w.id === door.wall);
-      if (door && wall) {
-        const [x0, y0] = door.polygon[0], [x1, y1] = door.polygon[1];
-        const n = wall.inward_normal;
-        this.walkPos.set((x0 + x1) / 2 + n[0] * 0.35, (y0 + y1) / 2 + n[1] * 0.35, EYE);
+      const entry = entryDoor(this.room, (p) => inAny(p, this.polys));
+      if (entry) {
+        this.walkPos.set(entry.c[0] + entry.n[0] * 0.6, entry.c[1] + entry.n[1] * 0.6, EYE);
+        this.walk.yaw = Math.atan2(entry.n[1], entry.n[0]);
       } else {
         this.walkPos.set(cx, cy, EYE);
+        this.walk.yaw = 0;
       }
-      this.walk.yaw = Math.atan2(cy - this.walkPos.y, cx - this.walkPos.x);
       this.walk.pitch = -0.25;
     }
     if (mode === "orbit") {
@@ -449,7 +541,20 @@ export class Viewport {
       this.controls.update();
     }
     for (const rec of this.objects.values()) rec.label.visible = true;
-    this.roomGroup.traverse((o) => { if (o.userData.planOnly) o.visible = this.mode === "plan"; });
+    this.roomGroup.traverse((o) => {
+      if (o.userData.planOnly) o.visible = this.mode === "plan";
+      else if (o.userData.walkOnly) o.visible = this.mode === "walk";
+      else if (o.userData.notPlan) o.visible = this.mode !== "plan";
+      else if (o.userData.notWalk) o.visible = this.mode !== "walk";
+    });
+    // dollhouse: from outside, walls between you and the rooms fade so you can see in
+    const cam = this.camera.position;
+    for (const m of this.wallMeshes || []) {
+      const { out, c, mats } = m.userData.wall;
+      const near = this.mode === "orbit" && out[0] * (cam.x - c[0]) + out[1] * (cam.y - c[1]) > 0;
+      const want = near || this.room?.splat ? mats.faded : mats.solid;
+      if (m.material !== want) m.material = want;
+    }
     this.renderer.render(this.scene, this.camera);
     this.labels.render(this.scene, this.camera);
   }

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -149,6 +150,30 @@ def polygon_area(pts) -> float:
     return s / 2
 
 
+HEX_COLOR = r"^#[0-9a-fA-F]{6}$"
+
+
+class Surface(BaseModel):
+    """How a floor, wall or ceiling looks: a color, optionally a repeating texture image."""
+
+    color: str | None = Field(None, pattern=HEX_COLOR, description="average color, #rrggbb")
+    texture: str | None = Field(None, description="image under the scene's folder, e.g. finishes/floor.jpg")
+    size_m: float = Field(1.0, gt=0, description="the texture image covers size_m x size_m of surface")
+
+    @field_validator("texture")
+    @classmethod
+    def _rel(cls, v: str | None) -> str | None:
+        if v is not None and (v.startswith("/") or ".." in Path(v).parts):
+            raise ValueError("texture must be a path inside the scene folder")
+        return v
+
+
+class Finish(BaseModel):
+    floor: Surface | None = None
+    walls: Surface | None = None
+    ceiling: Surface | None = None
+
+
 class Space(BaseModel):
     """A named part of the home: a room behind walls, or a zone of an open-plan area.
 
@@ -163,6 +188,7 @@ class Space(BaseModel):
     polygon: list[tuple[float, float]] = Field(min_length=3)
     ceiling_height: float | None = None
     open_to: list[str] = Field(default_factory=list)
+    finish: Finish | None = Field(None, description="floor, wall and ceiling look (e.g. sampled from the capture)")
 
     @field_validator("kind")
     @classmethod

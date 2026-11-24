@@ -82,6 +82,15 @@ zones back and delete spaces; each edit is undoable. The AI can read spaces and 
 `list_objects`, `render_view`, `check_layout` and `solve_layout` to one of them, but only
 you can change them. `mise demo` also creates a small demo apartment.
 
+**What the empty home looks like.** Each space can carry a `finish`: a color and optional
+repeating texture (with its real size in meters) for its floor, walls and ceiling. The
+editor draws solid walls with door and window openings cut through, open door leaves,
+baseboards, and ceilings when you walk around; in orbit view the walls nearest you fade.
+`mise.pipeline.finishes` samples finishes from the capture: it resamples a metric patch
+of floor or wall straight from a posed frame (lens distortion included), removes the
+lighting falloff, and makes it tile. Set finishes with `PATCH /api/scenes/{id}/spaces/{space}`
+(`{"finish": {...}}`); texture paths are relative to the scene's folder.
+
 The AI (header `X-Actor: agent`) may write only to variants and never moves locked objects.
 You promote its changes into `main` from the editor, one change at a time, and every
 change is an undoable operation in `ops.jsonl`.

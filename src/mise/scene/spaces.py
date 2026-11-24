@@ -138,7 +138,7 @@ def add_space(room: Room, name: str, kind: str, polygon, ceiling_height: float |
 
 def update_space(room: Room, space_id: str, **fields) -> Room:
     r = as_spaces(room)
-    allowed = {"name", "kind", "ceiling_height", "open_to", "polygon"}
+    allowed = {"name", "kind", "ceiling_height", "open_to", "polygon", "finish"}
     bad = set(fields) - allowed
     if bad:
         raise ValueError(f"cannot update fields {sorted(bad)}")
@@ -163,7 +163,8 @@ def split_space(room: Room, space_id: str, axis: str, at: float, new_name: str, 
     idx = r.spaces.index(s)
     r.spaces[idx] = s.model_copy(update={"polygon": lo, "open_to": sorted(set(s.open_to) | {new_id})})
     r.spaces.insert(idx + 1, Space(id=new_id, name=new_name, kind=new_kind, polygon=hi,
-                                   ceiling_height=s.ceiling_height, open_to=sorted(set(s.open_to) | {space_id})))
+                                   ceiling_height=s.ceiling_height, open_to=sorted(set(s.open_to) | {space_id}),
+                                   finish=s.finish))
     # spaces that were open to the old space stay open to both halves
     for i, o in enumerate(r.spaces):
         if space_id in o.open_to and o.id not in (space_id, new_id):

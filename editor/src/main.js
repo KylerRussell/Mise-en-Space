@@ -439,3 +439,4 @@ window.addEventListener("keydown", (e) => {
 });
 
 loadScenes().then(() => { if (params.get("view")) setView(params.get("view")); }).catch((e) => toast(e.message, "error"));
+if (params.has("debug")) window.__mise = { vp, state }; // for scripted screenshots and poking from the console

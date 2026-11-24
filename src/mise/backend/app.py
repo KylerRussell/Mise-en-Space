@@ -113,6 +113,7 @@ class SpacePatch(BaseModel):
     ceiling_height: float | None = None
     open_to: list[str] | None = None
     polygon: list[tuple[float, float]] | None = None
+    finish: dict | None = None
 
 
 class SplitBody(BaseModel):
