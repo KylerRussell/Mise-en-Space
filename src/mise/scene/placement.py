@@ -51,7 +51,7 @@ def support_height(support: str, objects: dict[str, SceneObject]) -> float | Non
     base = objects.get(support)
     if base is None:
         return 0.0
-    return base.pose.z + base.dims.h
+    return base.pose.z + base.extent().h
 
 
 def apply_support(obj: SceneObject, objects: dict[str, SceneObject]) -> None:
@@ -67,7 +67,7 @@ def snap_to_wall(obj: SceneObject, room: Room, max_dist: float = 0.15, max_angle
     """
     center = np.array([obj.pose.x, obj.pose.y])
     right, front = g.local_axes(obj.pose.yaw)
-    back_mid = center - front * obj.dims.d / 2
+    back_mid = center - front * obj.extent().d / 2
     wall, dist, along = g.nearest_wall(back_mid, room)
     n = g.wall_inward_normal(wall, room)
     ang = math.degrees(math.acos(float(np.clip(np.dot(front, n), -1, 1))))
@@ -76,7 +76,7 @@ def snap_to_wall(obj: SceneObject, room: Room, max_dist: float = 0.15, max_angle
     yaw = g.yaw_facing(n)
     a = np.array(wall.a)
     foot = a + g.wall_direction(wall) * along
-    new_center = foot + n * obj.dims.d / 2
+    new_center = foot + n * obj.extent().d / 2
     obj.pose.x, obj.pose.y, obj.pose.yaw = float(new_center[0]), float(new_center[1]), round(yaw, 6)
     return wall.id
 
@@ -102,9 +102,9 @@ def resolve_relation(obj: SceneObject, rel: Relation, room: Room, objects: dict[
         wall = room.wall(rel.target)
         n = g.wall_inward_normal(wall, room)
         along = wall.length / 2 if rel.along is None else rel.along
-        half = obj.dims.w / 2
+        half = obj.extent().w / 2
         along = float(np.clip(along, half, max(half, wall.length - half)))
-        p = g.wall_point(wall, along) + n * (rel.distance + obj.dims.d / 2)
+        p = g.wall_point(wall, along) + n * (rel.distance + obj.extent().d / 2)
         pose.x, pose.y, pose.yaw = float(p[0]), float(p[1]), g.yaw_facing(n)
         support = "floor"
         note = f"back against wall {wall.id}, {along:.2f} m along it"
@@ -135,17 +135,17 @@ def resolve_relation(obj: SceneObject, rel: Relation, room: Room, objects: dict[
             note = f"on top of {tgt.id}"
         else:
             if rel.relation == "in_front_of":
-                p = tc + t_front * (tgt.dims.d / 2 + rel.distance + obj.dims.d / 2)
+                p = tc + t_front * (tgt.extent().d / 2 + rel.distance + obj.extent().d / 2)
                 yaw = g.yaw_facing(-t_front) if rel.face_target else pose.yaw
             elif rel.relation == "behind":
-                p = tc - t_front * (tgt.dims.d / 2 + rel.distance + obj.dims.d / 2)
+                p = tc - t_front * (tgt.extent().d / 2 + rel.distance + obj.extent().d / 2)
                 yaw = g.yaw_facing(t_front) if rel.face_target else pose.yaw
             elif rel.relation == "left_of":
                 # target's left as seen by someone facing the target's front
-                p = tc + t_right * (tgt.dims.w / 2 + rel.distance + obj.dims.w / 2)
+                p = tc + t_right * (tgt.extent().w / 2 + rel.distance + obj.extent().w / 2)
                 yaw = tgt.pose.yaw
             else:  # right_of
-                p = tc - t_right * (tgt.dims.w / 2 + rel.distance + obj.dims.w / 2)
+                p = tc - t_right * (tgt.extent().w / 2 + rel.distance + obj.extent().w / 2)
                 yaw = tgt.pose.yaw
             pose.x, pose.y, pose.yaw = float(p[0]), float(p[1]), g.wrap_deg(yaw)
             support = "floor" if tgt.support == "floor" else tgt.support

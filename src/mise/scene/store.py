@@ -207,7 +207,7 @@ class SceneStore:
     # ---- edits ---------------------------------------------------------------
     def move(self, scene_id: str, variant: str, object_id: str, *, x: float | None = None, y: float | None = None,
              yaw: float | None = None, z: float | None = None, support: str | None = None, snap: bool = True,
-             actor: Actor = "user") -> dict:
+             roll: float | None = None, pitch: float | None = None, actor: Actor = "user") -> dict:
         with self._lock:
             self._guard(actor, variant)
             scene = self.load(scene_id)
@@ -226,6 +226,14 @@ class SceneStore:
                 obj.pose.z = z
             if support is not None:
                 obj.support = support
+            if roll is not None or pitch is not None:
+                new_pose = Pose.model_validate({**obj.pose.model_dump(),
+                                                **({"roll": roll} if roll is not None else {}),
+                                                **({"pitch": pitch} if pitch is not None else {})})
+                if new_pose.tipped and obj.upright_required:
+                    hint = "" if actor == "agent" else "; untick 'Upright only' if it can stand another way"
+                    raise ValueError(f"{obj.name} ({obj.id}) only stands upright{hint}")
+                obj.pose.roll, obj.pose.pitch = new_pose.roll, new_pose.pitch
             objs = {o.id: o for o in scene.resolve(variant)}
             objs[object_id] = obj
             notes = placement.snap(obj, scene.room, objs, scene.rules.snap_yaw_step, scene.rules.snap_wall_distance) if snap \
@@ -291,7 +299,7 @@ class SceneStore:
             dep.pose.x = new.pose.x + c * rx - s * ry
             dep.pose.y = new.pose.y + s * rx + c * ry
             dep.pose.yaw += dyaw
-            dep.pose.z = new.pose.z + new.dims.h
+            dep.pose.z = new.pose.z + new.extent().h
             st = self._get_state(scene, variant, dep.id)
             if variant == MAIN:
                 self._set_state(scene, MAIN, dep.id, {"object": dep.model_dump()})
@@ -357,14 +365,14 @@ class SceneStore:
 
     def update_object(self, scene_id: str, variant: str, object_id: str, fields: dict, actor: Actor = "user") -> dict:
         """Change non-pose fields (name, locked, dims...) of an object in main or an added object."""
-        allowed = {"name", "locked", "dims", "category", "color", "warnings", "product", "asset", "asset_kind"}
+        allowed = {"name", "locked", "dims", "category", "color", "warnings", "product", "asset", "asset_kind", "upright_only"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"cannot update fields {sorted(bad)}")
         with self._lock:
             self._guard(actor, variant)
-            if actor == "agent" and "locked" in fields:
-                raise PermissionError_("only you can lock or unlock objects")
+            if actor == "agent" and {"locked", "upright_only"} & set(fields):
+                raise PermissionError_("only you can lock objects or change whether they may be tipped")
             scene = self.load(scene_id)
             before = self._get_state(scene, variant, object_id)
             if before is None:
@@ -420,7 +428,7 @@ class SceneStore:
         a = scene.library_asset(asset_id)
         obj = SceneObject(
             id=self.new_object_id(scene, a.category), name=a.name, category=a.category, asset=a.asset,
-            asset_kind=a.asset_kind, asset_transform=a.asset_transform, pose=pose, dims=a.dims, support=support, source=a.source, product=a.product,
+            asset_kind=a.asset_kind, asset_transform=a.asset_transform, pose=pose, dims=a.dims, upright_only=a.upright_only, support=support, source=a.source, product=a.product,
             anisotropy=a.anisotropy, warnings=list(a.warnings),
         )
         return self.add_object(scene_id, variant, obj, snap=snap, actor=actor)
@@ -502,7 +510,8 @@ class SceneStore:
                 continue
             dist = math.hypot(ob.pose.x - oa.pose.x, ob.pose.y - oa.pose.y) + abs(ob.pose.z - oa.pose.z)
             rot = abs((ob.pose.yaw - oa.pose.yaw + 180) % 360 - 180)
-            if dist > 1e-3 or rot > 0.1:
+            tipped = ob.pose.roll != oa.pose.roll or ob.pose.pitch != oa.pose.pitch
+            if dist > 1e-3 or rot > 0.1 or tipped:
                 changes.append(Change(kind="move", object_id=oid, name=ob.name, before=oa.pose, after=ob.pose,
                                       distance_m=round(dist, 3), rotation_deg=round(rot, 1)))
         for oid, oa in A.items():

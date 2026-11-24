@@ -65,7 +65,7 @@ def constraint_cost(c: Constraint, objs: dict[str, SceneObject], room: Room) -> 
     t = objs.get(c.target or "") if c.target and not c.target.startswith("wall") else None
 
     if c.kind in ("against_wall", "centered_on_wall"):
-        back = center - front * o.dims.d / 2
+        back = center - front * o.extent().d / 2
         w = _wall(room, c.target, back)
         n = g.wall_inward_normal(w, room)
         dist = g.point_segment_distance(back, np.array(w.a), np.array(w.b))
@@ -108,15 +108,15 @@ def constraint_cost(c: Constraint, objs: dict[str, SceneObject], room: Room) -> 
     if c.kind == "in_front_of":
         t_right, t_front = g.local_axes(t.pose.yaw)
         rel = center - tc
-        ahead = float(rel @ t_front) - t.dims.d / 2 - o.dims.d / 2
+        ahead = float(rel @ t_front) - t.extent().d / 2 - o.extent().d / 2
         lateral = abs(float(rel @ t_right))
         lo, hi = c.min if c.min is not None else 0.3, c.max if c.max is not None else 1.5
-        return max(0.0, lo - ahead) + max(0.0, ahead - hi) + 0.5 * max(0.0, lateral - t.dims.w / 2)
+        return max(0.0, lo - ahead) + max(0.0, ahead - hi) + 0.5 * max(0.0, lateral - t.extent().w / 2)
     if c.kind == "beside":
         t_right, t_front = g.local_axes(t.pose.yaw)
         rel = center - tc
-        offset_front = abs(float(rel @ t_front) - (t.dims.d - o.dims.d) / 2)  # align backs
-        side = abs(float(rel @ t_right)) - t.dims.w / 2 - o.dims.w / 2
+        offset_front = abs(float(rel @ t_front) - (t.extent().d - o.extent().d) / 2)  # align backs
+        side = abs(float(rel @ t_right)) - t.extent().w / 2 - o.extent().w / 2
         hi = c.max if c.max is not None else 0.1
         return max(0.0, side - hi) + max(0.0, -side) + 0.5 * offset_front
     return 0.0
@@ -181,9 +181,9 @@ def solve_layout(scene: Scene, variant: str, constraints: list[Constraint], mova
     def wall_proposal(o: SceneObject) -> tuple[float, float, float]:
         w = room.walls[rng.integers(len(room.walls))]
         n = g.wall_inward_normal(w, room)
-        half = o.dims.w / 2
+        half = o.extent().w / 2
         along = rng.uniform(half, max(half, w.length - half))
-        p = g.wall_point(w, along) + n * o.dims.d / 2
+        p = g.wall_point(w, along) + n * o.extent().d / 2
         return float(p[0]), float(p[1]), g.yaw_facing(n)
 
     E, H = energy()

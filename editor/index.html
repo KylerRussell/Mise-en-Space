@@ -34,7 +34,11 @@
           <button id="rot-left" title="Rotate -15° (Q)">⟲ 15°</button>
           <button id="rot-right" title="Rotate +15° (E)">⟳ 15°</button>
           <button id="rot-90" title="Rotate 90° (R)">90°</button>
+          <button id="tip" title="Stand it on its side / end (T)">Tip 90°</button>
         </div>
+        <label class="check" title="Untick for things that work on any side, like a cube shelf stood on its end">
+          <input type="checkbox" id="upright-only" /> Upright only
+        </label>
         <div class="row">
           <button id="toggle-lock" title="Locked items never move for the AI">Lock</button>
           <button id="delete" class="danger" title="Delete / hide (Del)">Remove</button>
@@ -70,7 +74,7 @@
     </aside>
 
     <main id="viewport">
-      <div id="hint" class="hint">Drag to move · Q/E rotate 15° · R 90° · Del remove · Esc deselect</div>
+      <div id="hint" class="hint">Drag to move · Q/E rotate 15° · R 90° · T tip · Del remove · Esc deselect</div>
       <div id="walk-hint" class="hint walk" hidden>Click to look around · WASD to walk · Esc to release</div>
     </main>
 

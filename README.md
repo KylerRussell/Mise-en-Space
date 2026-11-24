@@ -62,6 +62,15 @@ Meters, z up, floor at z = 0. Each object's canonical frame is centered on x/y w
 footprint on z = 0 and **its front facing local +y**; `pose.yaw` rotates it counter-clockwise.
 `support` is `floor`, `wall:<id>` or another object's id, and dependents move with their support.
 
+Objects can also be **tipped** in 90° steps: `pose.roll` turns an object about its own front
+axis (roll 90 stands a wide, low cube shelf on its end) and `pose.pitch` about its width axis.
+`dims` is the object as modeled; `extent()` is its size as placed, and every check, snap and
+render uses the extent. Only categories that truly work one way up default to
+`upright_only` (sofas, beds, chairs, tables, desks, lamps, wardrobes...; see
+`UPRIGHT_CATEGORIES` in `scene/models.py`). Shelves, cube storage and unknown categories
+may tip, and you can override any object with the editor's "Upright only" box. The AI can
+tip objects in its variants but can't change that setting.
+
 The AI (header `X-Actor: agent`) may write only to variants and never moves locked objects.
 You promote its changes into `main` from the editor, one change at a time, and every
 change is an undoable operation in `ops.jsonl`.
@@ -105,6 +114,11 @@ generates 3D, finds up and front, fits **one** uniform scale (the median of the 
 ratios) and gates on anisotropy: up to 1.10 accept, up to 1.25 accept with a warning
 badge, otherwise retry with another image and finally fall back to a labeled box at the
 listed size. It never stretches each axis to match.
+
+It only guesses up and down for upright-only objects. For anything that may tip, it keeps
+the generator's axes and tries every 90° arrangement against the listing instead. A shelf
+listed lying down but generated standing up is matched by tipping it, not rejected.
+Pass `upright_only` to `import_product` to override the category default.
 
 **Idol API details are not verified.** The docs hosts were unreachable from the build
 environment, so `products/idol.py` uses fal's generic queue API, and the model ids and

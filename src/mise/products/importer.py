@@ -11,7 +11,7 @@ from typing import Literal, Protocol
 import numpy as np
 
 from ..pipeline import ply
-from ..scene.models import Dims, LibraryAsset, Product
+from ..scene.models import Dims, LibraryAsset, Product, upright_required
 from . import color, dimensions, orient, scale_fit
 from .idol import IdolResult
 from .listing import Listing, fetch_listing
@@ -43,6 +43,7 @@ class ImportRequest:
     mesh: bool = False  # Idol Max (GLB) instead of base Idol (splat)
     camera_dir: tuple[float, float, float] | None = None  # input camera viewing direction, asset frame
     max_attempts: int = 2
+    upright_only: bool | None = None  # None = category default (see scene.models.UPRIGHT_CATEGORIES)
     accept: float = scale_fit.ACCEPT
     warn: float = scale_fit.WARN
 
@@ -66,6 +67,16 @@ def guess_image_type(image_bytes: bytes) -> Literal["real", "synthetic"]:
     border = np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]])
     uniform = (border.std(axis=0) < 6).all()
     return "synthetic" if uniform and border.mean() > 225 else "real"
+
+
+def axis_permutation(perm: tuple[int, int, int]) -> np.ndarray:
+    """Rotation whose output axis i is input axis perm[i] (a proper rotation: det = +1)."""
+    P = np.zeros((3, 3))
+    for i, j in enumerate(perm):
+        P[i, j] = 1.0
+    if np.linalg.det(P) < 0:
+        P[0] *= -1  # mirror-free: flip one axis instead of reflecting the object
+    return P
 
 
 def _points_from_result(res: IdolResult) -> tuple[np.ndarray, np.ndarray | None]:
@@ -102,6 +113,7 @@ def run_import(req: ImportRequest, out_dir: Path, generator: Generator | None,
     warnings = list(parsed.notes)
     attempts: list[dict] = []
     images = req.image_urls or listing.images
+    upright = upright_required(req.category, req.upright_only)
 
     for img in images[: max(1, req.max_attempts)]:
         if generator is None:
@@ -116,9 +128,9 @@ def run_import(req: ImportRequest, out_dir: Path, generator: Generator | None,
         try:
             res = generator.generate(img, adir / f"gen{len(attempts)}", image_type=image_type, mesh=req.mesh)
             pts, w = _points_from_result(res)
-            o = orient.orient(pts, w, up_hint=np.array(res.up_axis) if res.up_axis else None,
+            o = orient.orient(pts, w, up_hint=np.array(res.up_axis) if res.up_axis else None, upright_only=upright,
                               camera_dir=np.array(req.camera_dir) if req.camera_dir else None)
-            fit = scale_fit.fit_scale(listed, o.dims, req.accept, req.warn)
+            fit = scale_fit.fit_scale(listed, o.dims, req.accept, req.warn, allow_tipping=not upright)
         except Exception as e:  # keep going with the next image
             attempts.append({"image": img, "image_type": image_type, "error": str(e)})
             continue
@@ -128,9 +140,7 @@ def run_import(req: ImportRequest, out_dir: Path, generator: Generator | None,
         if fit.gate == "reject":
             continue
         # Build the canonical, metric asset.
-        R = o.R
-        if fit.swapped_wd:
-            R = ply.rot_z(90) @ R
+        R = axis_permutation(fit.perm) @ o.R
         t_after = None
         if res.kind == "splat":
             s = ply.read_ply(res.path)
@@ -165,7 +175,7 @@ def run_import(req: ImportRequest, out_dir: Path, generator: Generator | None,
             id=asset_id, name=name, category=req.category, asset=str(path.relative_to(out_dir.parent)),
             asset_kind=kind, asset_transform=t_after, dims=Dims(w=dims_m[0], d=dims_m[1], h=dims_m[2]),
             source="product", product=product, anisotropy=round(fit.anisotropy, 4), warnings=warnings,
-            status="warning" if fit.gate == "warn" else "ready",
+            status="warning" if fit.gate == "warn" else "ready", upright_only=req.upright_only,
         )
         return ImportResult(asset=asset, attempts=attempts, listing=listing)
 
@@ -173,7 +183,7 @@ def run_import(req: ImportRequest, out_dir: Path, generator: Generator | None,
     warnings.append("3D generation failed the size gate or was unavailable; showing a labeled box at the listed size")
     asset = LibraryAsset(id=asset_id, name=name, category=req.category, asset=None, asset_kind="box",
                          dims=Dims(w=listed[0], d=listed[1], h=listed[2]), source="product", product=product,
-                         warnings=warnings, status="fallback_box")
+                         warnings=warnings, status="fallback_box", upright_only=req.upright_only)
     return ImportResult(asset=asset, attempts=attempts, listing=listing)
 
 

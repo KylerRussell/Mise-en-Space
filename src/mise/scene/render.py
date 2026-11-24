@@ -96,8 +96,8 @@ def render_plan(room: Room, objects: list[SceneObject], violations: list[Violati
         # front marker
         right, front = g.local_axes(o.pose.yaw)
         c = np.array([o.pose.x, o.pose.y])
-        f0 = c + front * o.dims.d / 2
-        dr.line([P(f0 - right * o.dims.w * 0.3), P(f0 + right * o.dims.w * 0.3)], fill=(0, 0, 0, 200), width=4)
+        f0 = c + front * o.extent().d / 2
+        dr.line([P(f0 - right * o.extent().w * 0.3), P(f0 + right * o.extent().w * 0.3)], fill=(0, 0, 0, 200), width=4)
         r = max(10, px_per_m // 8)
         cx, cy = P(c)
         if o.support != "floor" and not o.support.startswith("wall:"):
@@ -106,7 +106,7 @@ def render_plan(room: Room, objects: list[SceneObject], violations: list[Violati
         dr.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(20, 20, 20, 230))
         dr.text((cx, cy), str(n), fill=(255, 255, 255, 255), font=f_big, anchor="mm")
         if show_dims:
-            dr.text((cx, cy + r + 2), f"{o.dims.w:.2f}x{o.dims.d:.2f}", fill=(40, 40, 40, 220), font=f_small, anchor="ma")
+            dr.text((cx, cy + r + 2), f"{o.extent().w:.2f}x{o.extent().d:.2f}", fill=(40, 40, 40, 220), font=f_small, anchor="ma")
     # scale bar
     x0, y0 = 12, img.height - 18
     dr.line([(x0, y0), (x0 + px_per_m, y0)], fill=(0, 0, 0, 255), width=3)
@@ -118,7 +118,7 @@ def render_plan(room: Room, objects: list[SceneObject], violations: list[Violati
 
 def _box_faces(o: SceneObject) -> list[np.ndarray]:
     fp = g.object_footprint(o)
-    z0, z1 = o.pose.z, o.pose.z + o.dims.h
+    z0, z1 = o.pose.z, o.pose.z + o.extent().h
     bot = [np.array([*p, z0]) for p in fp]
     top = [np.array([*p, z1]) for p in fp]
     faces = [np.array(top)]
@@ -181,7 +181,7 @@ def render_perspective(room: Room, objects: list[SceneObject], eye: tuple[float,
             col = tuple(int(c * shade) for c in base[:3]) + (255,)
             outline = (220, 30, 30, 255) if o.id == highlight else (40, 40, 40, 255)
             polys.append((float(np.mean([p[1] for p in pr])), [p[0] for p in pr], col, outline))
-        c, z = proj(np.array([o.pose.x, o.pose.y, o.pose.z + o.dims.h + 0.05]))
+        c, z = proj(np.array([o.pose.x, o.pose.y, o.pose.z + o.extent().h + 0.05]))
         if c:
             centers.append((i + 1, c))
     for _, pts, fill, outline in sorted(polys, key=lambda t: -t[0]):
@@ -206,10 +206,10 @@ def render_view(room: Room, objects: list[SceneObject], view: Literal["plan", "e
         o = next(o for o in objects if o.id == object_id)
         _, front = g.local_axes(o.pose.yaw)
         right, _ = g.local_axes(o.pose.yaw)
-        dist = max(o.dims.w, o.dims.d, o.dims.h) * 1.6 + 0.8
+        dist = max(o.extent().w, o.extent().d, o.extent().h) * 1.6 + 0.8
         e2 = np.array([o.pose.x, o.pose.y]) + (front * 0.85 + right * 0.5) * dist
-        eye = (float(e2[0]), float(e2[1]), o.pose.z + o.dims.h + 0.6)
-        target = (o.pose.x, o.pose.y, o.pose.z + o.dims.h / 2)
+        eye = (float(e2[0]), float(e2[1]), o.pose.z + o.extent().h + 0.6)
+        target = (o.pose.x, o.pose.y, o.pose.z + o.extent().h / 2)
         return render_perspective(room, objects, eye, target, fov_deg=55, highlight=object_id)
     poly = np.asarray(room.floor_polygon, float)
     if eye is None:

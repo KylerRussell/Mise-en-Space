@@ -42,6 +42,11 @@ then call `solve_layout` with relations, e.g.
 `{"kind": "away_from_window", "obj": "bookshelf_1"}`.
 Use `move_object` / `place_relative` for single tweaks and fix every violation it reports.
 
+Orientation: unless `upright_required` is true, an object may be tipped in 90° steps
+(`move_object(..., roll=90)` stands a wide, low shelf on its end). Listings often show only
+one way. For tippable pieces, try both orientations when space or style is tight and keep the
+better one; mention the choice in the change list. Never tip an upright-only object.
+
 ## 7. Critique
 `render_view` plan and eye-level; check against the brief and the style card; revise.
 At most 3 rounds per variant. `check_layout` must show zero hard violations.

@@ -1,6 +1,15 @@
 // Client-side footprint math for live feedback while dragging.
 // The backend's check_layout is authoritative; this only colors boxes mid-drag.
 
+/** Size as placed: the backend sends `extent`; otherwise derive it from roll/pitch. */
+export function extentOf(o) {
+  if (o.extent) return o.extent;
+  let { w, d, h } = o.dims;
+  if (Math.round((o.pose.roll || 0) / 90) % 2) [w, h] = [h, w];
+  if (Math.round((o.pose.pitch || 0) / 90) % 2) [d, h] = [h, d];
+  return { w, d, h };
+}
+
 export function footprint(pose, dims, pad = 0) {
   const a = (pose.yaw * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
   const hw = dims.w / 2 + pad, hd = dims.d / 2 + pad;
@@ -39,14 +48,16 @@ const IGNORED = new Set(["rug", "mat"]);
 
 /** Ids of objects that overlap `obj` (footprint + height) or stick out of the room. */
 export function liveConflicts(obj, objects, floorPolygon) {
-  const fp = footprint(obj.pose, obj.dims);
+  const E = extentOf(obj);
+  const fp = footprint(obj.pose, E);
   const hits = [];
   if (IGNORED.has(obj.category)) return hits;
   for (const o of objects) {
     if (o.id === obj.id || IGNORED.has(o.category) || o.support === obj.id || obj.support === o.id) continue;
-    const zo = Math.min(obj.pose.z + obj.dims.h, o.pose.z + o.dims.h) - Math.max(obj.pose.z, o.pose.z);
+    const Eo = extentOf(o);
+    const zo = Math.min(obj.pose.z + E.h, o.pose.z + Eo.h) - Math.max(obj.pose.z, o.pose.z);
     if (zo <= 0.01) continue;
-    const d = penetration(fp, footprint(o.pose, o.dims));
+    const d = penetration(fp, footprint(o.pose, Eo));
     if (d > 0.01) hits.push({ id: o.id, depth: d });
   }
   if (!fp.every((p) => pointInPolygon(p, floorPolygon))) hits.push({ id: "__room__", depth: 0 });

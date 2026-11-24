@@ -183,12 +183,15 @@ function renderSelection() {
   if (!o) return;
   $("#sel-info").innerHTML = `
     <div class="title">${esc(o.name)} <span class="dim">${esc(o.id)}</span></div>
-    <div class="dim">${o.dims.w.toFixed(2)} × ${o.dims.d.toFixed(2)} × ${o.dims.h.toFixed(2)} m · on ${esc(o.support)}</div>
-    <div class="dim">x ${o.pose.x.toFixed(2)} · y ${o.pose.y.toFixed(2)} · yaw ${o.pose.yaw.toFixed(0)}°</div>
+    <div class="dim">${o.extent.w.toFixed(2)} × ${o.extent.d.toFixed(2)} × ${o.extent.h.toFixed(2)} m as placed · on ${esc(o.support)}</div>
+    <div class="dim">x ${o.pose.x.toFixed(2)} · y ${o.pose.y.toFixed(2)} · yaw ${o.pose.yaw.toFixed(0)}°${o.pose.roll || o.pose.pitch ? ` · tipped ${o.pose.roll ? `roll ${o.pose.roll}°` : ""}${o.pose.pitch ? ` pitch ${o.pose.pitch}°` : ""}` : ""}</div>
     ${o.product ? `<div><a href="${esc(o.product.url)}" target="_blank" rel="noopener">${esc(o.product.retailer || "product")}</a> ${o.product.price ?? ""} ${esc(o.product.currency ?? "")}</div>` : ""}
     ${o.moved_from_scan ? '<div class="pill warn">moved from scan: lighting is baked from its old spot</div>' : ""}
     ${(o.warnings || []).map((w) => `<div class="warnline">${esc(w)}</div>`).join("")}`;
   $("#toggle-lock").textContent = o.locked ? "Unlock" : "Lock";
+  $("#tip").hidden = o.upright_required;
+  $("#upright-only").checked = o.upright_required;
+  $("#upright-only").disabled = state.variant !== "main";
   $("#delete").textContent = state.variant === "main" ? "Delete" : "Hide";
 }
 
@@ -218,6 +221,24 @@ async function removeSelected() {
   });
 }
 
+async function tip() {
+  const o = state.objects.find((x) => x.id === state.selected);
+  if (!o) return;
+  if (o.upright_required) return toast(`${o.name} is set to upright only`, "warn");
+  await guarded(async () => {
+    const r = await api.move(state.scene, state.variant, o.id, { roll: ((o.pose.roll || 0) + 90) % 180, snap: true });
+    if (r.violations_caused?.length) toast(r.violations_caused[0].message, "warn");
+    await refresh();
+  });
+}
+
+$("#tip").onclick = tip;
+$("#upright-only").onchange = (e) => guarded(async () => {
+  const o = state.objects.find((x) => x.id === state.selected);
+  if (e.target.checked && (o.pose.roll || o.pose.pitch)) await api.move(state.scene, "main", o.id, { roll: 0, pitch: 0, snap: true });
+  await api.update(state.scene, "main", o.id, { upright_only: e.target.checked });
+  await refresh();
+});
 $("#rot-left").onclick = () => rotate(-15);
 $("#rot-right").onclick = () => rotate(15);
 $("#rot-90").onclick = () => rotate(90);
@@ -308,6 +329,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "q" || e.key === "Q") rotate(-15);
   else if (e.key === "e" || e.key === "E") rotate(15);
   else if (e.key === "r" || e.key === "R") rotate(90);
+  else if (e.key === "t" || e.key === "T") tip();
   else if (e.key === "Delete" || e.key === "Backspace") removeSelected();
   else if (e.key === "Escape") select(null);
   else if (e.key === "1") setView("orbit");

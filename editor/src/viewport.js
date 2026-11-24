@@ -4,7 +4,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
-import { footprint, liveConflicts } from "./geometry.js";
+import { extentOf, footprint, liveConflicts } from "./geometry.js";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 const EYE = 1.6;
@@ -178,7 +178,8 @@ export class Viewport {
       rec.data = o;
       rec.index = i;
       this._applyPose(rec);
-      rec.label.element.innerHTML = `<b>${o.label ?? i + 1}</b> ${o.name}<span class="dim">${o.dims.w.toFixed(2)}×${o.dims.d.toFixed(2)}×${o.dims.h.toFixed(2)} m</span>`
+      const ext = extentOf(o);
+      rec.label.element.innerHTML = `<b>${o.label ?? i + 1}</b> ${o.name}<span class="dim">${ext.w.toFixed(2)}×${ext.d.toFixed(2)}×${ext.h.toFixed(2)} m</span>`
         + (o.warnings?.some((w) => w.startsWith("size mismatch")) ? `<span class="warnbadge" title="${o.warnings.join("\n")}">size ±</span>` : "")
         + (o.locked ? `<span class="lockbadge">locked</span>` : "");
     });
@@ -193,7 +194,13 @@ export class Viewport {
   }
 
   _build(o, i, key) {
+    // group: position + yaw.  tip: roll/pitch about the box center.  body: the canonical-frame object.
     const group = new THREE.Group();
+    const tip = new THREE.Group();
+    const body = new THREE.Group();
+    body.position.z = -o.dims.h / 2;
+    tip.add(body);
+    group.add(tip);
     const geo = new THREE.BoxGeometry(o.dims.w, o.dims.d, o.dims.h);
     geo.translate(0, 0, o.dims.h / 2);
     const isBox = o.asset_kind === "box" || !o.asset;
@@ -206,9 +213,9 @@ export class Viewport {
     // front marker: a thin bar on the +y face
     const front = new THREE.Mesh(new THREE.BoxGeometry(o.dims.w * 0.6, 0.02, 0.02), new THREE.MeshBasicMaterial({ color: 0x111111 }));
     front.position.set(0, o.dims.d / 2, 0.012);
-    group.add(box, edges, front);
+    body.add(box, edges, front);
     if (o.asset_kind === "splat" && o.asset) {
-      group.add(new SplatMesh({ url: this.fileUrl(this.sceneId, o.asset) }));
+      body.add(new SplatMesh({ url: this.fileUrl(this.sceneId, o.asset) }));
     } else if (o.asset_kind === "mesh" && o.asset) {
       this.gltf.load(this.fileUrl(this.sceneId, o.asset), (g) => {
         const holder = new THREE.Group();
@@ -218,14 +225,14 @@ export class Viewport {
           holder.applyMatrix4(m);
         }
         holder.add(g.scene);
-        group.add(holder);
+        body.add(holder);
       });
     }
     const label = this._label("", "obj-label");
     label.position.set(0, 0, o.dims.h + 0.08);
     group.add(label);
     this.objGroup.add(group);
-    const rec = { data: o, group, box, edges, label, key, isBox };
+    const rec = { data: o, group, tip, box, edges, label, key, isBox };
     this.objects.set(o.id, rec);
     return rec;
   }
@@ -234,6 +241,10 @@ export class Viewport {
     const p = rec.data.pose;
     rec.group.position.set(p.x, p.y, p.z);
     rec.group.rotation.set(0, 0, (p.yaw * Math.PI) / 180);
+    const ext = extentOf(rec.data);
+    rec.tip.position.z = ext.h / 2;
+    rec.tip.rotation.set(((p.pitch || 0) * Math.PI) / 180, ((p.roll || 0) * Math.PI) / 180, 0, "XYZ");
+    rec.label.position.z = ext.h + 0.08;
   }
 
   setFlagged(ids) { this.flagged = new Set(ids); this._restyle(); }
@@ -387,11 +398,11 @@ export class Viewport {
   focus(id) {
     const rec = this.objects.get(id);
     if (!rec || this.mode !== "orbit") return;
-    this.controls.target.set(rec.data.pose.x, rec.data.pose.y, rec.data.pose.z + rec.data.dims.h / 2);
+    this.controls.target.set(rec.data.pose.x, rec.data.pose.y, rec.data.pose.z + extentOf(rec.data).h / 2);
   }
 
   footprintOf(id) {
     const rec = this.objects.get(id);
-    return rec ? footprint(rec.data.pose, rec.data.dims) : null;
+    return rec ? footprint(rec.data.pose, extentOf(rec.data)) : null;
   }
 }

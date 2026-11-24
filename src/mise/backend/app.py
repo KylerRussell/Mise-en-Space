@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..scene import checks, placement, render
-from ..scene.models import MAIN, Dims, LibraryAsset, Pose, Scene, SceneObject
+from ..scene.models import MAIN, Dims, LibraryAsset, Pose, Scene, SceneObject, upright_required
 from ..scene.store import PermissionError_, SceneStore
 
 DATA_DIR = Path(os.environ.get("MISE_DATA", "data/scenes"))
@@ -39,6 +39,8 @@ class MoveBody(BaseModel):
     y: float | None = None
     z: float | None = None
     yaw: float | None = None
+    roll: float | None = None
+    pitch: float | None = None
     support: str | None = None
     snap: bool = True
 
@@ -59,6 +61,7 @@ class UploadBody(BaseModel):
     d: float
     h: float
     image_url: str | None = None
+    upright_only: bool | None = None
 
 
 class VariantBody(BaseModel):
@@ -79,6 +82,7 @@ class ImportBody(BaseModel):
     image_urls: list[str] | None = None
     image_type: Literal["real", "synthetic", "auto"] = "auto"
     mesh: bool = False
+    upright_only: bool | None = None
 
 
 class UpdateBody(BaseModel):
@@ -249,14 +253,16 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         variant_ok(s, variant)
         objs = s.resolve(variant, include_hidden=include_hidden)
         hidden = set(s.variant(variant).hidden) if variant != MAIN else set()
-        return [{**o.model_dump(), "label": i + 1, "hidden": o.id in hidden} for i, o in enumerate(objs)]
+        return [{**o.model_dump(), "label": i + 1, "hidden": o.id in hidden, "extent": o.extent().model_dump(),
+                 "upright_required": o.upright_required} for i, o in enumerate(objs)]
 
     # ---- edits ---------------------------------------------------------------------------
     @app.post("/api/scenes/{scene_id}/variants/{variant}/objects/{object_id}/move")
     def move(scene_id: str, variant: str, object_id: str, body: MoveBody, x_actor: str | None = Header(None)):
         scene_or_404(scene_id)
         return guard(store.move, scene_id, variant, object_id, x=body.x, y=body.y, z=body.z, yaw=body.yaw,
-                     support=body.support, snap=body.snap, actor=actor_of(x_actor))
+                     support=body.support, snap=body.snap, roll=body.roll, pitch=body.pitch,
+                     actor=actor_of(x_actor))
 
     @app.post("/api/scenes/{scene_id}/variants/{variant}/objects/{object_id}/place")
     def place(scene_id: str, variant: str, object_id: str, rel: placement.Relation, apply: bool = True,
@@ -278,7 +284,7 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         if body.asset_id:
             a = guard(s.library_asset, body.asset_id)
             obj = SceneObject(id=store.new_object_id(s, a.category), name=a.name, category=a.category, asset=a.asset,
-                              asset_kind=a.asset_kind, asset_transform=a.asset_transform, dims=a.dims,
+                              asset_kind=a.asset_kind, asset_transform=a.asset_transform, dims=a.dims, upright_only=a.upright_only,
                               source=a.source, product=a.product, anisotropy=a.anisotropy, warnings=list(a.warnings),
                               support=body.support)
         elif body.object:
@@ -392,6 +398,7 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         s = scene_or_404(scene_id)
         a = LibraryAsset(id=f"upl_{uuid.uuid4().hex[:8]}", name=body.name, category=body.category, asset_kind="box",
                          dims=Dims(w=body.w, d=body.d, h=body.h), source="upload", status="fallback_box",
+                         upright_only=body.upright_only,
                          warnings=["typed dimensions; no 3D model yet"])
         store.add_library_asset(scene_id, a, actor_of(x_actor))
         return a.model_dump()
@@ -408,12 +415,14 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
             try:
                 listing = listing_fetcher(body.url) if listing_fetcher else None
                 req = ImportRequest(url=body.url, category=body.category, name=body.name, dims_override=body.dims,
-                                    image_urls=body.image_urls, image_type=body.image_type, mesh=body.mesh)
+                                    image_urls=body.image_urls, image_type=body.image_type, mesh=body.mesh,
+                                    upright_only=body.upright_only)
                 res = run_import(req, store.scene_dir(scene_id) / "assets", generator, listing=listing,
                                  fetch_image=image_fetcher or _fetch_bytes)
                 store.add_library_asset(scene_id, res.asset)
                 a = res.asset
                 job.result = {"asset_id": a.id, "name": a.name, "dims": a.dims.model_dump(), "anisotropy": a.anisotropy,
+                              "upright_only": upright_required(a.category, a.upright_only),
                               "status": a.status, "warnings": a.warnings, "attempts": res.attempts,
                               "product": a.product.model_dump() if a.product else None}
                 job.status = "done"

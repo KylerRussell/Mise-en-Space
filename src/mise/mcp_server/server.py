@@ -27,6 +27,12 @@ Tools for redesigning a real, to-scale 3D room. Units are meters, yaw is degrees
 counter-clockwise about +z, z is up and the floor is z = 0. An object's front faces
 its local +y. Objects are numbered in renders; the label map ties numbers to ids.
 
+Orientation: objects can be tipped in 90° steps (roll about the front axis, pitch about
+the width axis) unless upright_required is true. `dims` is the object as modeled; `extent`
+is its size as placed. Many things work more than one way up: a cube shelf listed lying
+down often stands well on its end. When an object may tip, consider both ways and keep the
+one that fits the room and the brief better. Never tip an upright_required object.
+
 Rules:
 - You can only edit variants. Start with create_variant; the user's own layout ("main")
   is read-only to you. The user promotes your changes from the editor, item by item.
@@ -80,9 +86,11 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
 
     @mcp.tool()
     def list_objects(scene: Scene, variant: Variant = "main", include_hidden: bool = False) -> list[dict]:
-        """Every object in a variant with its render label, dims (w, d, h), pose, support, lock flag and product info."""
+        """Every object in a variant: render label, dims as modeled, extent as placed (after tipping), pose,
+        support, lock flag, whether it must stay upright, and product info."""
         objs = call("GET", f"/api/scenes/{scene}/variants/{variant}/objects", params={"include_hidden": include_hidden})
-        keep = ("label", "id", "name", "category", "dims", "pose", "support", "locked", "source", "hidden", "warnings", "anisotropy")
+        keep = ("label", "id", "name", "category", "dims", "extent", "pose", "support", "locked", "upright_required",
+                "source", "hidden", "warnings", "anisotropy")
         out = []
         for o in objs:
             row = {k: o.get(k) for k in keep}
@@ -124,10 +132,15 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
     @mcp.tool()
     def move_object(scene: Scene, variant: Variant, object_id: str,
                     x: float | None = None, y: float | None = None, yaw: float | None = None,
+                    roll: Annotated[float | None, Field(description=(
+                        "tip about the object's front axis in 90° steps (0, 90, 180, 270): 90 stands a wide, "
+                        "low shelf on its end. Refused for upright_required objects"))] = None,
+                    pitch: Annotated[float | None, Field(description="tip about the width axis in 90° steps")] = None,
                     snap: Annotated[bool, Field(description="snap yaw to 15° and backs to nearby walls")] = True) -> dict:
-        """Set x, y and yaw (deg). Keeps the object on its support. Returns the new pose and violations this move caused."""
+        """Set x, y, yaw (deg) and optionally tip it (roll/pitch). Keeps the object on its support.
+        Returns the new pose and violations this move caused."""
         return call("POST", f"/api/scenes/{scene}/variants/{variant}/objects/{object_id}/move",
-                    json={"x": x, "y": y, "yaw": yaw, "snap": snap})
+                    json={"x": x, "y": y, "yaw": yaw, "roll": roll, "pitch": pitch, "snap": snap})
 
     @mcp.tool()
     def place_relative(scene: Scene, variant: Variant, object_id: str,
@@ -168,12 +181,15 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
                        dims: Annotated[str | None, Field(description="dimension string if the page lacks one, e.g. '84\"W x 38\"D x 34\"H'")] = None,
                        image_urls: list[str] | None = None,
                        image_type: Literal["real", "synthetic", "auto"] = "auto",
+                       upright_only: Annotated[bool | None, Field(description=(
+                           "true if it only works one way up, false if it may stand on any side; "
+                           "omit to use the category default (sofas, beds, lamps... are upright-only)"))] = None,
                        wait_seconds: Annotated[int, Field(description="how long to wait for the job (0 = return the job id)")] = 240) -> dict:
         """Turn a product URL into a 3D asset sized to its listed dimensions (async job).
         Returns asset id, dims, anisotropy and warnings. status 'fallback_box' means generation failed the size gate."""
         job = call("POST", f"/api/scenes/{scene}/imports",
                    json={"url": url, "category": category, "name": name, "dims": dims, "image_urls": image_urls,
-                         "image_type": image_type})
+                         "image_type": image_type, "upright_only": upright_only})
         deadline = time.time() + max(0, wait_seconds)
         while job["status"] in ("queued", "running") and time.time() < deadline:
             time.sleep(1.0)

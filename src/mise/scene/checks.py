@@ -102,8 +102,8 @@ def check_objects(room: Room, objects: list[SceneObject], rules, only: set[str] 
                 kind="out_of_room", severity="hard", objects=[o.id], amount_m=round(amt, 3),
                 message=f"{_name(o)} extends {amt:.2f} m outside the room",
             ))
-        if o.pose.z + o.dims.h > room.ceiling_height + rules.collision_tolerance:
-            amt = o.pose.z + o.dims.h - room.ceiling_height
+        if o.pose.z + o.extent().h > room.ceiling_height + rules.collision_tolerance:
+            amt = o.pose.z + o.extent().h - room.ceiling_height
             out.append(Violation(
                 kind="out_of_room", severity="hard", objects=[o.id], amount_m=round(amt, 3),
                 message=f"{_name(o)} is {amt:.2f} m taller than the ceiling allows",
@@ -135,7 +135,7 @@ def check_objects(room: Room, objects: list[SceneObject], rules, only: set[str] 
             for o in objects:
                 if only and o.id not in only:
                     continue
-                top = o.pose.z + o.dims.h
+                top = o.pose.z + o.extent().h
                 if top < max(rules.tall_object_height, op.bottom + 0.1):
                     continue
                 pen = g.penetration_depth(zone, fps[o.id])

@@ -83,6 +83,8 @@ details summary { cursor: pointer; color: var(--muted); margin: 8px 0; }
 .warnings .kind { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .warnline { color: var(--warn); font-size: 12px; margin-top: 3px; }
 #sel-info .title { font-weight: 600; }
+.check { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--muted); }
+.check input { width: auto; }
 
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { text-align: left; padding: 4px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }

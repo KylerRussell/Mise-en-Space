@@ -15,9 +15,35 @@ import math
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 MAIN = "main"  # id of the user's own layout
+
+# Categories that only work one way up. Everything else (shelves, cube storage, boxes,
+# unknown categories) may be tipped onto a side or end. Keep this list short: it only
+# holds things that are unusable or unsafe any other way, and every object can override
+# it with `upright_only`.
+UPRIGHT_CATEGORIES = frozenset({
+    "sofa", "armchair", "chair", "stool", "bench", "bed", "crib", "desk", "table", "dining_table",
+    "coffee_table", "side_table", "nightstand", "dresser", "wardrobe", "lamp", "floor_lamp",
+    "plant", "rug", "mat", "tv", "tv_stand", "toilet", "mirror", "refrigerator",
+})
+
+
+def upright_required(category: str, upright_only: bool | None) -> bool:
+    if upright_only is not None:
+        return upright_only
+    return category.lower() in UPRIGHT_CATEGORIES
+
+
+def tipped_extent(dims: "Dims", roll: float, pitch: float) -> "Dims":
+    """Axis-aligned size (in the object's yaw frame) after roll/pitch in 90° steps."""
+    w, d, h = dims.w, dims.d, dims.h
+    if round(roll / 90) % 2:  # about local y: width and height trade places
+        w, h = h, w
+    if round(pitch / 90) % 2:  # about local x: depth and height trade places
+        d, h = h, d
+    return Dims(w=w, d=d, h=h)
 
 
 def now_iso() -> str:
@@ -29,9 +55,26 @@ class Pose(BaseModel):
     y: float = 0.0
     z: float = 0.0
     yaw: float = 0.0  # degrees, CCW about +z
+    # Tipping, in 90° steps, applied before yaw. roll turns the object about its own
+    # front axis (local y): roll 90 stands a wide, low shelf on its end. pitch turns it
+    # about its width axis (local x). Both are 0 for an object standing as listed.
+    roll: float = 0.0
+    pitch: float = 0.0
+
+    @field_validator("roll", "pitch")
+    @classmethod
+    def _right_angles(cls, v: float) -> float:
+        q = round(v / 90.0)
+        if abs(v - 90.0 * q) > 1e-6:
+            raise ValueError("roll and pitch must be multiples of 90°")
+        return float((q % 4) * 90)
 
     def yaw_rad(self) -> float:
         return math.radians(self.yaw)
+
+    @property
+    def tipped(self) -> bool:
+        return bool(self.roll or self.pitch)
 
 
 class Dims(BaseModel):
@@ -146,6 +189,18 @@ class SceneObject(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     color: str | None = Field(None, description="display color for box assets")
     moved_from_scan: bool = False
+    upright_only: bool | None = Field(
+        None, description="True: may only stand as modeled. False: may be tipped. None: category default")
+
+    @property
+    def upright_required(self) -> bool:
+        return upright_required(self.category, self.upright_only)
+
+    def extent(self) -> Dims:
+        """Size as placed (after tipping): width along the yaw frame's x, depth along y, height up."""
+        if not self.pose.tipped:
+            return self.dims
+        return tipped_extent(self.dims, self.pose.roll, self.pose.pitch)
 
 
 class LibraryAsset(BaseModel):
@@ -160,6 +215,7 @@ class LibraryAsset(BaseModel):
     dims: Dims
     source: Literal["product", "upload", "scanned"] = "product"
     status: Literal["ready", "warning", "fallback_box"] = "ready"
+    upright_only: bool | None = None
     product: Product | None = None
     anisotropy: float | None = None
     warnings: list[str] = Field(default_factory=list)

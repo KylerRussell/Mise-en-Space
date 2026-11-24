@@ -10,6 +10,12 @@ balanced on its back fails it). Front is the horizontal box axis that best
 faces the input camera. When the best two up candidates score within a
 small margin the result is marked ambiguous, so the caller can ask a VLM
 with two renders.
+
+The up/down search only runs for upright-only objects (sofas, beds, lamps...).
+Many objects can be owned on any side (a cube shelf listed lying down often
+stands on its end), and a "correct" up would wrongly rule those out. For them
+we keep the generator's own axes and let the scale fit pick whichever 90°
+arrangement matches the listing (scale_fit.fit_scale(allow_tipping=True)).
 """
 
 from __future__ import annotations
@@ -73,13 +79,19 @@ def score_up(points: np.ndarray, up: np.ndarray, weights: np.ndarray | None = No
 
 
 def orient(points: np.ndarray, weights: np.ndarray | None = None, up_hint: np.ndarray | None = None,
-           camera_dir: np.ndarray | None = None, ambiguity_margin: float = 0.15) -> Orientation:
+           camera_dir: np.ndarray | None = None, ambiguity_margin: float = 0.15,
+           upright_only: bool = True) -> Orientation:
     """Compute the canonical transform for an object's point set (asset units).
 
     up_hint: a declared up axis (e.g. +Y for Idol Max GLBs); it gets a strong prior.
     camera_dir: direction from the input camera toward the object, in asset frame.
+    upright_only: False skips the up/down search (see module docstring).
     """
     pts = np.asarray(points, dtype=np.float64)
+    if not upright_only:
+        up = np.asarray(up_hint, float) if up_hint is not None else np.array([0.0, 0.0, 1.0])
+        return _finish(pts, up / np.linalg.norm(up), camera_dir, score=1.0, ambiguous=False, candidates=[],
+                       notes=["may stand on any side: kept the generator's axes; the listing decides which way up"])
     c = pts.mean(axis=0)
     _, _, vt = np.linalg.svd(pts - c, full_matrices=False)
     cands: dict[str, np.ndarray] = {}
@@ -106,7 +118,10 @@ def orient(points: np.ndarray, weights: np.ndarray | None = None, up_hint: np.nd
     notes = []
     if ambiguous:
         notes.append(f"up axis ambiguous: {best_name} ({best:.2f}) vs {runner[0]} ({runner[1]:.2f}); confirm with a VLM")
+    return _finish(pts, up, camera_dir, best, ambiguous, scored[:4], notes)
 
+
+def _finish(pts: np.ndarray, up: np.ndarray, camera_dir, score: float, ambiguous: bool, candidates, notes) -> Orientation:
     B = _basis_from_up(up)
     q = pts @ B.T
     center, w, d, yaw = min_area_rect(q[:, :2])
@@ -141,7 +156,7 @@ def orient(points: np.ndarray, weights: np.ndarray | None = None, up_hint: np.nd
     t = -np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, zmin])
     h = float(np.percentile(p2[:, 2], 99.8) - zmin)
     dims = (float(hi[0] - lo[0]), float(hi[1] - lo[1]), h)
-    return Orientation(R=R, t=t, dims=dims, up_score=best, ambiguous=ambiguous, candidates=scored[:4], notes=notes)
+    return Orientation(R=R, t=t, dims=dims, up_score=score, ambiguous=ambiguous, candidates=candidates, notes=notes)
 
 
 def robust_dims(points_canonical: np.ndarray, q: float = 0.5) -> tuple[float, float, float]:

@@ -22,11 +22,11 @@ def footprint(pose: Pose, dims: Dims, pad: float = 0.0) -> np.ndarray:
 
 
 def object_footprint(o: SceneObject, pad: float = 0.0) -> np.ndarray:
-    return footprint(o.pose, o.dims, pad)
+    return footprint(o.pose, o.extent(), pad)
 
 
 def z_interval(o: SceneObject) -> tuple[float, float]:
-    return (o.pose.z, o.pose.z + o.dims.h)
+    return (o.pose.z, o.pose.z + o.extent().h)
 
 
 def local_axes(yaw_deg: float) -> tuple[np.ndarray, np.ndarray]:
