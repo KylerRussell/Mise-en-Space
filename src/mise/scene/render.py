@@ -99,13 +99,25 @@ def render_plan(room: Room, objects: list[SceneObject], violations: list[Violati
     for w in room.walls:
         dr.line([P(w.a), P(w.b)], fill=(40, 40, 40, 255), width=5)
     if multi:
-        f_space = _font(max(16, px_per_m // 5))
+        big = max(16, px_per_m // 5)
         for sp_ in spaces:  # name in the space's top-left corner, clear of most furniture
             pl = np.asarray(sp_.polygon, float)
-            corner = np.array([pl[:, 0].min() + 0.25, pl[:, 1].max() - 0.25])
-            if not g.point_in_polygon(corner, pl):
-                corner = _centroid(pl)
-            dr.text(P(corner), f"{sp_.name}  {sp_.area():.1f} m²", fill=(150, 140, 125, 255), font=f_space, anchor="la")
+            room_w = (pl[:, 0].max() - pl[:, 0].min()) * px_per_m
+            # shrink to fit the space; small closets get the name over the area, centered
+            for size in range(big, 8, -1):
+                f_space = _font(size)
+                one = f"{sp_.name}  {sp_.area():.1f} m²"
+                if dr.textlength(one, font=f_space) < room_w - 0.5 * px_per_m:
+                    corner = np.array([pl[:, 0].min() + 0.25, pl[:, 1].max() - 0.25])
+                    if not g.point_in_polygon(corner, pl):
+                        corner = _centroid(pl)
+                    dr.text(P(corner), one, fill=(150, 140, 125, 255), font=f_space, anchor="la")
+                    break
+                two = f"{sp_.name}\n{sp_.area():.1f} m²"
+                if dr.multiline_textbbox((0, 0), two, font=f_space)[2] < room_w - 0.1 * px_per_m or size == 9:
+                    dr.multiline_text(P(_centroid(pl)), two, fill=(150, 140, 125, 255), font=f_space, anchor="mm",
+                                      align="center")
+                    break
     for w in room.walls:
         a, b = np.array(w.a), np.array(w.b)
         if space and w.space != space:
