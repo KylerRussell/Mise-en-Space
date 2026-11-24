@@ -197,3 +197,15 @@ def test_doors_from_floor_points(aclient):
     assert c.patch(f"/api/scenes/{A}/openings/pantry_door", json={"width": 0.8}).status_code == 200
     assert c.delete(f"/api/scenes/{A}/openings/pantry_door", headers={"X-Actor": "agent"}).status_code == 403
     assert c.delete(f"/api/scenes/{A}/openings/pantry_door").status_code == 200
+
+
+def test_reach_in_closet_door_needs_no_walkway_inside(apt):
+    # a 0.6 m deep linen closet off the kitchen: you reach in, you don't walk in
+    r, sid = spaces.add_space(apt.room, "Linen closet", "closet", [(6.62, 4.12), (7.22, 4.12), (7.22, 5.0), (6.62, 5.0)])
+    r, _ = spaces.rewall(apt.room, r)
+    r.openings.append(spaces.door_from_points(r, (6.7, 4.12), (7.14, 4.12), opening_id="linen_door", swing="none"))
+    apt.room = r
+    assert r.wall(r.openings[-1].wall).space == sid
+    assert "walkway" not in kinds(apt)
+    r.space(sid).kind = "bedroom"  # the same size as a room you'd walk into does get flagged
+    assert any("linen_door" in v.message for v in check_layout(apt) if v.kind == "walkway")

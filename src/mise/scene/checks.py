@@ -279,16 +279,26 @@ def _walkway_checks(room: Room, objects, rules, fps, only) -> list[Violation]:
         o = floor_objs[int(counts.argmax())]
         return f"; narrowest stretch is around {_name(o)}"
 
+    def reach_in(op: Opening) -> bool:
+        """A door into a closet too shallow or narrow to walk into needs no walkway inside it."""
+        w = room.wall(op.wall)
+        if not w.space or room.space(w.space).kind not in ("closet", "storage"):
+            return False
+        sp = room.space(w.space)
+        poly = np.asarray(sp.polygon, float)
+        return float((poly.max(0) - poly.min(0)).min()) < rules.walkway_min
+
     # Door-to-door walkway.
     lab_walk = merged(components(rules.walkway_min / 2), rules.walkway_min / 2)
-    labels = {op.id: door_label(op, lab_walk, rules.walkway_min / 2) for op in doors}
-    for op in doors:
+    walk_doors = [op for op in doors if not reach_in(op)]
+    labels = {op.id: door_label(op, lab_walk, rules.walkway_min / 2) for op in walk_doors}
+    for op in walk_doors:
         if labels[op.id] < 0:
             out.append(Violation(
                 kind="walkway", severity="hard", objects=[], amount_m=rules.walkway_min,
                 message=f"no {rules.walkway_min:.2f} m wide approach to door {op.id}{bottleneck([])}",
             ))
-    good = [op for op in doors if labels[op.id] >= 0]
+    good = [op for op in walk_doors if labels[op.id] >= 0]
     for a, b in zip(good, good[1:]):
         if labels[a.id] != labels[b.id]:
             out.append(Violation(
