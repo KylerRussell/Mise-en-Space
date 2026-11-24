@@ -122,10 +122,10 @@ def capture_report(info: dict, frames_dir: Path, kept: list[dict], blur_rel: flo
             elif f:
                 seg[1] = ti
             elif seg is not None:
-                rep.fast_segments_s.append((round(seg[0], 1), round(seg[1], 1)))
+                rep.fast_segments_s.append((round(float(seg[0]), 1), round(float(seg[1]), 1)))
                 seg = None
         if seg:
-            rep.fast_segments_s.append((round(seg[0], 1), round(seg[1], 1)))
+            rep.fast_segments_s.append((round(float(seg[0]), 1), round(float(seg[1]), 1)))
     rep.brightness_range = (round(min(bright), 1), round(max(bright), 1))
     if not rep.landscape:
         rep.notes.append("portrait capture: the protocol asks for landscape")
