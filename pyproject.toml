@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 markers = ["opencv-contrib-python>=4.9"]
+poses = ["pycolmap>=3.11", "opencv-python-headless>=4.9"]
 eval = ["lpips", "torch"]
 dev = ["pytest>=8"]
 
