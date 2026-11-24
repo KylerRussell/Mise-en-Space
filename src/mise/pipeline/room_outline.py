@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+INSET = 1.5  # cells between the outline of free space and the wall, measured on synthetic rooms (see _finish)
+
 
 @dataclass
 class Outline:
@@ -105,6 +107,38 @@ def _rectilinear(poly: np.ndarray, min_edge: float) -> np.ndarray:
     return np.array(verts)
 
 
+def _offset_ccw(poly: np.ndarray, d: float) -> np.ndarray:
+    """Push every edge of a counter-clockwise rectilinear polygon outward by d."""
+    n = len(poly)
+    lines = []
+    for i in range(n):
+        a, b = poly[i], poly[(i + 1) % n]
+        e = b - a
+        out = np.array([e[1], -e[0]]) / (np.linalg.norm(e) or 1.0)  # right of travel = outside for CCW
+        lines.append((a + out * d, e))
+    verts = []
+    for i in range(n):
+        (p1, e1), (p2, e2) = lines[i - 1], lines[i]
+        A = np.array([e1, -e2]).T
+        if abs(np.linalg.det(A)) < 1e-12:
+            verts.append(p2)
+            continue
+        t = np.linalg.solve(A, p2 - p1)
+        verts.append(p1 + e1 * t[0])
+    return np.array(verts)
+
+
+def _finish(poly: np.ndarray, inset: float) -> tuple[np.ndarray, float]:
+    """CCW orientation, then undo the inset that stopping sight lines short of walls leaves."""
+    x, y = poly[:, 0], poly[:, 1]
+    area = 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    if area < 0:
+        poly = poly[::-1]
+    poly = _offset_ccw(poly, inset)
+    x, y = poly[:, 0], poly[:, 1]
+    return poly, 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
 def outline(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | None = None, cell: float = 0.05,
             min_hits: int = 3, open_m: float = 0.35, min_edge: float = 0.3) -> Outline:
     import cv2
@@ -129,13 +163,7 @@ def outline(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | Non
     c = max(cs, key=cv2.contourArea)
     c = cv2.approxPolyDP(c, 1.5, True)[:, 0, :].astype(float)
     poly = (c + 0.5) * cell + np.array(origin)
-    poly = _rectilinear(poly, min_edge)
-    # counter-clockwise
-    x, y = poly[:, 0], poly[:, 1]
-    area = 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
-    if area < 0:
-        poly = poly[::-1]
-        area = -area
+    poly, area = _finish(_rectilinear(poly, min_edge), INSET * cell)
     ceiling = None
     if points is not None and len(points):
         z = points[:, 2]
@@ -145,3 +173,107 @@ def outline(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | Non
             ceiling = float(e[h.argmax()] + 0.015)
     return Outline(polygon=[(float(a), float(b)) for a, b in poly], area_m2=area, ceiling_m=ceiling,
                    free=grid, origin=origin, cell=cell)
+
+
+# ---- a whole home: split free space into rooms at doorways ------------------------------
+
+@dataclass
+class Doorway:
+    center: tuple[float, float]
+    width: float
+    rooms: tuple[int, int]  # indexes into HomeOutline.rooms
+    axis: str  # "x" if the doorway runs along x (a wall parallel to x), else "y"
+
+
+@dataclass
+class HomeOutline:
+    rooms: list[Outline]
+    doorways: list[Doorway]
+    labels: np.ndarray  # room index per free cell (-1 elsewhere)
+    origin: tuple[float, float]
+    cell: float
+
+
+def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | None = None, cell: float = 0.05,
+                 min_hits: int = 3, core_m: float = 1.0, min_room_m2: float = 1.5, min_edge: float = 0.3) -> HomeOutline:
+    """Free space -> rooms. Doorways (narrower than core_m) separate rooms; open-plan areas stay one
+    room (split those into zones in software). Returns rectilinear outlines and the doorways found."""
+    import cv2
+    from collections import deque
+
+    grid, origin = free_space(cams, sights, cell)
+    free = (grid >= min_hits).astype(np.uint8)
+    free = cv2.morphologyEx(free, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    # room cores: what survives eroding by half a doorway-plus
+    r = max(1, int(round(core_m / 2 / cell)))
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    core = cv2.erode(free, disk)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(core)
+    keep = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] * cell * cell >= 0.25]
+    labels = -np.ones(free.shape, int)
+    q = deque()
+    for k, i in enumerate(keep):
+        ys, xs = np.nonzero(lab == i)
+        labels[ys, xs] = k
+        q.extend(zip(ys.tolist(), xs.tolist()))
+    # grow cores over free space (breadth first, so each cell goes to the nearest core)
+    H, W = free.shape
+    while q:
+        y, x = q.popleft()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            yy, xx = y + dy, x + dx
+            if 0 <= yy < H and 0 <= xx < W and free[yy, xx] and labels[yy, xx] < 0:
+                labels[yy, xx] = labels[y, x]
+                q.append((yy, xx))
+    rooms, index = [], {}
+    ceiling = outline_ceiling(points)
+    for k in range(len(keep)):
+        m = (labels == k).astype(np.uint8)
+        if m.sum() * cell * cell < min_room_m2:
+            continue
+        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        c = max(cs, key=cv2.contourArea)
+        c = cv2.approxPolyDP(c, 1.5, True)[:, 0, :].astype(float)
+        poly = _rectilinear((c + 0.5) * cell + np.array(origin), min_edge)
+        if len(poly) < 4:
+            continue
+        poly, area = _finish(poly, INSET * cell)
+        index[k] = len(rooms)
+        rooms.append(Outline(polygon=[(float(a), float(b)) for a, b in poly], area_m2=area, ceiling_m=ceiling,
+                             free=grid, origin=origin, cell=cell))
+    # doorways: where two rooms' cells touch
+    doorways = []
+    for axis, (dy, dx) in (("x", (1, 0)), ("y", (0, 1))):
+        a, b = labels[: H - dy, : W - dx], labels[dy:, dx:]
+        touch = (a >= 0) & (b >= 0) & (a != b)
+        pairs: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for y, x in zip(*np.nonzero(touch)):
+            ka, kb = int(a[y, x]), int(b[y, x])
+            if ka in index and kb in index:
+                pairs.setdefault(tuple(sorted((index[ka], index[kb]))), []).append((y, x))
+        for (ia, ib), cells in pairs.items():
+            cells = np.array(cells)
+            along = cells[:, 1] if axis == "x" else cells[:, 0]
+            width = (along.max() - along.min() + 1) * cell
+            cy, cx = cells.mean(0)
+            center = ((cx + 0.5 + dx / 2) * cell + origin[0], (cy + 0.5 + dy / 2) * cell + origin[1])
+            doorways.append(Doorway(center=(float(center[0]), float(center[1])), width=float(width), rooms=(ia, ib), axis=axis))
+    # one doorway per pair of rooms (the widest contact), and nothing narrower than a door
+    best: dict[tuple[int, int], Doorway] = {}
+    for d in doorways:
+        if d.width >= 0.4 and (d.rooms not in best or d.width > best[d.rooms].width):
+            best[d.rooms] = d
+    doorways = list(best.values())
+    return HomeOutline(rooms=rooms, doorways=doorways, labels=labels, origin=origin, cell=cell)
+
+
+def outline_ceiling(points: np.ndarray | None) -> float | None:
+    if points is None or not len(points):
+        return None
+    z = points[:, 2]
+    hi = z[z > 1.9]
+    if len(hi) <= 30:
+        return None
+    h, e = np.histogram(hi, bins=np.arange(1.9, max(hi.max(), 2.0) + 0.05, 0.03))
+    return float(e[h.argmax()] + 0.015)

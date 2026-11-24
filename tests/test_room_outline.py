@@ -33,8 +33,57 @@ def test_outline_recovers_l_shaped_room():
                      (3.0, 0.8, 1.5), (0.8, 2.0, 1.5)])
     sights = [np.array([p for p in pts if _visible(c, p, L_ROOM)]) for c in cams]
     out = room_outline.outline(cams, sights, points=pts)
-    assert abs(out.area_m2 - 16.25) / 16.25 < 0.08
+    assert abs(out.area_m2 - 16.25) / 16.25 < 0.04
     assert len(out.polygon) == 6
     xs = sorted({round(x, 1) for x, _ in out.polygon})
     assert np.allclose(xs, [0, 2.5, 5], atol=0.15)
     assert out.ceiling_m is not None and abs(out.ceiling_m - 2.5) < 0.05
+
+
+def test_segment_home_splits_rooms_at_doorway():
+    # two rooms side by side, joined by a 0.8 m doorway in a 0.12 m wall at x = 3..3.12
+    rng = np.random.default_rng(0)
+    walls = [((0, 0), (3, 0)), ((3, 0), (3, 1.0)), ((3, 1.8), (3, 3)), ((3, 3), (0, 3)), ((0, 3), (0, 0)),
+             ((3.12, 0), (6, 0)), ((6, 0), (6, 3)), ((6, 3), (3.12, 3)), ((3.12, 3), (3.12, 1.8)), ((3.12, 1.0), (3.12, 0)),
+             ((3, 1.0), (3.12, 1.0)), ((3, 1.8), (3.12, 1.8))]
+    pts = []
+    for a, b in walls:
+        a, b = np.array(a, float), np.array(b, float)
+        t = rng.uniform(0, 1, max(4, int(80 * np.linalg.norm(b - a))))
+        xy = a + (b - a) * t[:, None]
+        pts.append(np.c_[xy, rng.uniform(0.1, 2.4, len(t))])
+    pts = np.vstack(pts)
+    segs = [(np.array(a, float), np.array(b, float)) for a, b in walls]
+
+    def visible(c, p):
+        q = p[:2] + (c[:2] - p[:2]) * 0.02 / max(np.linalg.norm(c[:2] - p[:2]), 1e-9)
+        return not any(_cross(c[:2], q, a, b) for a, b in segs)
+
+    cams = np.array([(1, 1, 1.5), (2, 2, 1.5), (1.5, 1.4, 1.5), (2.6, 1.4, 1.5), (3.5, 1.4, 1.5), (4.5, 1, 1.5),
+                     (5, 2.2, 1.5), (4, 2.4, 1.5)])
+    sights = [np.array([p for p in pts if visible(c, p)]) for c in cams]
+    home = room_outline.segment_home(cams, sights)
+    assert len(home.rooms) == 2
+    areas = sorted(r.area_m2 for r in home.rooms)
+    assert np.allclose(areas, [8.64, 9.0], atol=0.35)
+    assert len(home.doorways) == 1
+    d = home.doorways[0]
+    assert abs(d.center[1] - 1.4) < 0.15 and abs(d.width - 0.8) < 0.2
+
+
+def test_home_scene_from_outline():
+    from mise.pipeline import sfm_scene
+    from mise.scene.checks import check_layout
+
+    home = room_outline.HomeOutline(
+        rooms=[room_outline.Outline(polygon=[(0, 0), (3, 0), (3, 3), (0, 3)], area_m2=9, ceiling_m=2.45, free=None,
+                                    origin=(0, 0), cell=0.05),
+               room_outline.Outline(polygon=[(3.12, 0), (6, 0), (6, 3), (3.12, 3)], area_m2=8.64, ceiling_m=None,
+                                    free=None, origin=(0, 0), cell=0.05)],
+        doorways=[room_outline.Doorway(center=(3.06, 1.4), width=0.8, rooms=(0, 1), axis="y")],
+        labels=np.zeros((1, 1)), origin=(0, 0), cell=0.05)
+    sc = sfm_scene.home_scene(home, "h", "Home")
+    assert [s.id for s in sc.room.spaces] == ["room_1", "room_2"] and sc.room.ceiling_height == 2.45
+    assert {o.wall.split(".")[0] for o in sc.room.openings} == {"room_1", "room_2"}
+    assert all(abs(o.width - 0.8) < 1e-9 for o in sc.room.openings)
+    assert check_layout(sc) == []  # the two rooms are joined through the doorway
