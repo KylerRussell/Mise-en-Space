@@ -111,6 +111,7 @@ function renderSpaces() {
   for (const li of $("#space-list").children) li.onclick = () => selectSpace(li.dataset.space === state.space ? null : li.dataset.space);
   const sp = spaces.find((s) => s.id === state.space);
   $("#space-edit").hidden = !sp;
+  syncOutlineEdit(sp);
   if (!sp) return;
   $("#space-name").value = sp.name;
   $("#space-kind").innerHTML = SPACE_KINDS.map((k) => `<option ${k === sp.kind ? "selected" : ""}>${k}</option>`).join("");
@@ -122,6 +123,16 @@ function renderSpaces() {
   if (spaces.length < 2) $("#space-merge").disabled = $("#space-delete").disabled = $("#space-merge-with").disabled = true;
   $("#space-hint").textContent = editable ? "" : "Spaces are edited in the main layout.";
 }
+
+function syncOutlineEdit(sp) {
+  const on = !!sp && $("#space-outline").checked && state.variant === "main";
+  vp.editOutline(on ? sp : null, (polygon) => roomEdit(() => api.updateSpace(state.scene, sp.id, { polygon }), `${sp.name}: outline updated`));
+}
+
+$("#space-outline").onchange = (e) => {
+  if (e.target.checked) setView("plan");
+  syncOutlineEdit(state.room?.spaces?.find((s) => s.id === state.space));
+};
 
 function selectSpace(id) {
   state.space = id;

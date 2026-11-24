@@ -92,6 +92,7 @@ export class Viewport {
     this.room = room;
     this.roomGroup.traverse((o) => { if (o.isCSS2DObject) o.element.remove(); });
     this.roomGroup.clear();
+    this.outlineEdit = null;
     const polys = room.floor_polygons || [room.floor_polygon];
     this.polys = polys;
     this.floors = [];
@@ -343,6 +344,87 @@ export class Viewport {
     for (const el of this.el.querySelectorAll(".space-label")) el.classList.toggle("sel", !!space && el.dataset.space === space.id);
   }
 
+  /** Show draggable corner and edge handles for one space's outline (plan view). */
+  editOutline(space, onChange) {
+    if (this.outlineDrag) return; // a live update arrived mid-drag: keep the handles you hold
+    if (this.outlineEdit) { this.roomGroup.remove(this.outlineEdit.group); this.outlineEdit = null; }
+    if (!space) return;
+    const group = new THREE.Group();
+    const poly = space.polygon.map((p) => [...p]);
+    const handles = [];
+    const mk = (color, size) => new THREE.Mesh(new THREE.BoxGeometry(size, size, 0.02), new THREE.MeshBasicMaterial({ color }));
+    poly.forEach((p, i) => {
+      const h = mk(0x1f6feb, 0.16);
+      h.userData = { kind: "vertex", i };
+      handles.push(h);
+      group.add(h);
+      const e = mk(0xffffff, 0.12);
+      e.material.color.set(0x1f6feb); e.material.transparent = true; e.material.opacity = 0.55;
+      e.userData = { kind: "edge", i };
+      handles.push(e);
+      group.add(e);
+    });
+    const line = new THREE.LineLoop(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x1f6feb }));
+    group.add(line);
+    this.roomGroup.add(group);
+    this.outlineEdit = { space, poly, handles, line, group, onChange };
+    this._layoutOutline();
+  }
+
+  _layoutOutline() {
+    const { poly, handles, line } = this.outlineEdit;
+    for (const h of handles) {
+      const { kind, i } = h.userData;
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      if (kind === "vertex") h.position.set(a[0], a[1], 0.05);
+      else h.position.set((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0.05);
+    }
+    line.geometry.setFromPoints(poly.map(([x, y]) => new THREE.Vector3(x, y, 0.04)));
+  }
+
+  _outlineDown(e) {
+    if (!this.outlineEdit) return false;
+    this._ray(e);
+    const hit = this.raycaster.intersectObjects(this.outlineEdit.handles, false)[0];
+    if (!hit) return false;
+    const p = this._floorPoint(e);
+    this.outlineDrag = { ...hit.object.userData, start: p, poly0: this.outlineEdit.poly.map((q) => [...q]) };
+    this.controls.enabled = false;
+    this.renderer.domElement.setPointerCapture(e.pointerId);
+    return true;
+  }
+
+  _outlineMove(e) {
+    const d = this.outlineDrag;
+    const p = this._floorPoint(e);
+    if (!p) return;
+    const snap = (v) => Math.round(v * 20) / 20;
+    const poly = this.outlineEdit.poly, n = poly.length;
+    const dx = p.x - d.start.x, dy = p.y - d.start.y;
+    if (d.kind === "vertex") {
+      poly[d.i] = [snap(d.poly0[d.i][0] + dx), snap(d.poly0[d.i][1] + dy)];
+    } else {
+      // slide the edge along its normal, keeping its direction (walls stay square)
+      const a = d.poly0[d.i], b = d.poly0[(d.i + 1) % n];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;
+      let t = dx * nx + dy * ny;
+      if (Math.abs(nx) < 1e-6 || Math.abs(ny) < 1e-6) t = Math.round(t * 20) / 20;
+      poly[d.i] = [a[0] + nx * t, a[1] + ny * t];
+      poly[(d.i + 1) % n] = [b[0] + nx * t, b[1] + ny * t];
+    }
+    this._layoutOutline();
+  }
+
+  _outlineUp() {
+    const d = this.outlineDrag;
+    this.outlineDrag = null;
+    this.controls.enabled = this.mode === "orbit";
+    const poly = this.outlineEdit.poly;
+    const changed = poly.some((q, i) => q[0] !== d.poly0[i][0] || q[1] !== d.poly0[i][1]);
+    if (changed) this.outlineEdit.onChange(poly.map(([x, y]) => [Math.round(x * 1000) / 1000, Math.round(y * 1000) / 1000]));
+  }
+
   /** Next click on the floor reports a point; a guide line shows where an x/y split would go. */
   startPick(axis) { this.pickMode = { axis }; this.el.classList.add("picking"); }
   cancelPick() { this.pickMode = null; this.splitLine.visible = false; this.el.classList.remove("picking"); }
@@ -404,6 +486,7 @@ export class Viewport {
       if (p) this.onFloorPick?.({ x: p.x, y: p.y, axis });
       return;
     }
+    if (this._outlineDown(e)) return;
     const id = this._pick(e);
     this.onSelect(id);
     if (!id) return;
@@ -419,6 +502,7 @@ export class Viewport {
   }
 
   _move(e) {
+    if (this.outlineDrag) { this._outlineMove(e); return; }
     if (this.pickMode) {
       const p = this._floorPoint(e);
       if (!p) return;
@@ -452,6 +536,7 @@ export class Viewport {
   }
 
   _up() {
+    if (this.outlineDrag) { this._outlineUp(); return; }
     if (!this.drag) return;
     const d = this.drag;
     this.drag = null;

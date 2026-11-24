@@ -29,8 +29,13 @@ class Outline:
     cell: float
 
 
+# Sight lines go only to points this high: above most furniture, so lines pass over sofas,
+# desks and counters to the walls behind them instead of treating furniture as walls.
+Z_BAND = (1.0, 2.3)
+
+
 def free_space(cams: np.ndarray, sights: list[np.ndarray], cell: float = 0.05,
-               z_band: tuple[float, float] = (0.05, 2.2)) -> tuple[np.ndarray, tuple[float, float]]:
+               z_band: tuple[float, float] = Z_BAND) -> tuple[np.ndarray, tuple[float, float]]:
     """cams: Nx3 camera centers. sights[i]: Mx3 points camera i observed. Returns hit counts per cell."""
     allp = np.vstack([cams] + [s for s in sights if len(s)])
     lo = np.percentile(allp[:, :2], 1, axis=0) - 0.5
@@ -140,10 +145,10 @@ def _finish(poly: np.ndarray, inset: float) -> tuple[np.ndarray, float]:
 
 
 def outline(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | None = None, cell: float = 0.05,
-            min_hits: int = 3, open_m: float = 0.35, min_edge: float = 0.3) -> Outline:
+            min_hits: int = 3, open_m: float = 0.35, min_edge: float = 0.3, z_band: tuple[float, float] = Z_BAND) -> Outline:
     import cv2
 
-    grid, origin = free_space(cams, sights, cell)
+    grid, origin = free_space(cams, sights, cell, z_band)
     free = (grid >= min_hits).astype(np.uint8)
     k = max(1, int(round(open_m / cell)))
     kernel = np.ones((k, k), np.uint8)
@@ -164,13 +169,7 @@ def outline(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | Non
     c = cv2.approxPolyDP(c, 1.5, True)[:, 0, :].astype(float)
     poly = (c + 0.5) * cell + np.array(origin)
     poly, area = _finish(_rectilinear(poly, min_edge), INSET * cell)
-    ceiling = None
-    if points is not None and len(points):
-        z = points[:, 2]
-        hi = z[z > 1.9]
-        if len(hi) > 30:
-            h, e = np.histogram(hi, bins=np.arange(1.9, max(hi.max(), 2.0) + 0.05, 0.03))
-            ceiling = float(e[h.argmax()] + 0.015)
+    ceiling = outline_ceiling(points)
     return Outline(polygon=[(float(a), float(b)) for a, b in poly], area_m2=area, ceiling_m=ceiling,
                    free=grid, origin=origin, cell=cell)
 
@@ -195,13 +194,14 @@ class HomeOutline:
 
 
 def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | None = None, cell: float = 0.05,
-                 min_hits: int = 3, core_m: float = 1.0, min_room_m2: float = 1.5, min_edge: float = 0.3) -> HomeOutline:
+                 min_hits: int = 3, core_m: float = 1.0, min_room_m2: float = 1.5, min_edge: float = 0.3,
+                 z_band: tuple[float, float] = Z_BAND) -> HomeOutline:
     """Free space -> rooms. Doorways (narrower than core_m) separate rooms; open-plan areas stay one
     room (split those into zones in software). Returns rectilinear outlines and the doorways found."""
     import cv2
     from collections import deque
 
-    grid, origin = free_space(cams, sights, cell)
+    grid, origin = free_space(cams, sights, cell, z_band)
     free = (grid >= min_hits).astype(np.uint8)
     free = cv2.morphologyEx(free, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
@@ -269,11 +269,16 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
 
 
 def outline_ceiling(points: np.ndarray | None) -> float | None:
+    """Ceiling height: a dense layer of points near the top if there is one (textured or
+    lit ceilings), else the top of the point cloud (plain ceilings yield few points)."""
     if points is None or not len(points):
         return None
     z = points[:, 2]
     hi = z[z > 1.9]
     if len(hi) <= 30:
         return None
-    h, e = np.histogram(hi, bins=np.arange(1.9, max(hi.max(), 2.0) + 0.05, 0.03))
-    return float(e[h.argmax()] + 0.015)
+    top = float(np.percentile(hi, 99.5))
+    h, e = np.histogram(hi, bins=np.arange(1.9, top + 0.06, 0.03))
+    peak = float(e[h.argmax()] + 0.015)
+    # a real ceiling layer sits at the top; a peak far below it is wall clutter (cabinets, frames)
+    return peak if top - peak < 0.1 else top
