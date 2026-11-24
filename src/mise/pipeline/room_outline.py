@@ -53,6 +53,8 @@ def free_space(cams: np.ndarray, sights: list[np.ndarray], cell: float = 0.05,
         L = np.linalg.norm(d, axis=1)
         keep = L > 3 * cell
         d, L = d[keep], L[keep]
+        if not len(L):
+            continue
         stop = np.maximum(L - 2 * cell, 0) / L
         n = int(np.ceil(L.max() / (cell / 2))) + 1
         t = np.linspace(0, 1, n)[None, :] * stop[:, None]  # (M, n)

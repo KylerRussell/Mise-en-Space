@@ -219,8 +219,12 @@ def _locate(walls: list[Wall], pt: tuple[float, float], direction: tuple[float, 
 
 
 def rewall(old: Room, new: Room) -> tuple[Room, dict[str, str]]:
-    """Re-derive walls on `new` and move openings onto them. Returns (room, old wall id -> new wall id)."""
+    """Re-derive walls on `new` and move its openings onto them. Returns (room, old wall id -> new wall id).
+
+    `new` is the edited room, still carrying the walls it was edited against, so openings
+    added by the edit are re-attached too."""
     new = new.model_copy(deep=True)
+    edited_walls, edited_openings = list(new.walls), list(new.openings)
     new.walls = new.derive_walls()
     mapping: dict[str, str] = {}
     for w in old.walls:
@@ -231,10 +235,11 @@ def rewall(old: Room, new: Room) -> tuple[Room, dict[str, str]]:
         if hit:
             mapping[w.id] = hit[0].id
     openings: list[Opening] = []
-    for op in old.openings:
-        try:
-            w = old.wall(op.wall)
-        except KeyError:
+    stale = {w.id: w for w in old.walls}
+    stale.update({w.id: w for w in (edited_walls or [])})
+    for op in edited_openings:  # the edit's openings, placed on the walls they were given against
+        w = stale.get(op.wall)
+        if w is None:
             continue
         L = w.length or 1.0
         d = ((w.b[0] - w.a[0]) / L, (w.b[1] - w.a[1]) / L)
@@ -260,3 +265,70 @@ def wall_for_point(room: Room, pt: tuple[float, float], tol: float = 0.25) -> st
         if dist <= tol and (best is None or dist < best[1]):
             best = (w.id, dist)
     return best[0] if best else None
+
+
+# ---- doors and windows ----------------------------------------------------------------
+
+def door_from_points(room: Room, a, b, *, opening_id: str, kind: str = "door", max_dist: float = 0.35,
+                     **fields) -> Opening:
+    """An opening on the wall that runs along floor points a-b (e.g. the two jambs of a door).
+
+    Picks the nearest wall within max_dist that is roughly parallel to a-b; the opening is
+    centered on a-b's midpoint and as wide as a-b along that wall.
+    """
+    a, b = (float(a[0]), float(a[1])), (float(b[0]), float(b[1]))
+    mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+    seg = (b[0] - a[0], b[1] - a[1])
+    seg_len = math.hypot(*seg)
+    if seg_len < 0.2:
+        raise ValueError("the two points are too close for a door or window")
+    best = None
+    for w in room.walls:
+        dx, dy = w.b[0] - w.a[0], w.b[1] - w.a[1]
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            continue
+        ux, uy = dx / L, dy / L
+        if abs(ux * seg[0] + uy * seg[1]) / seg_len < math.cos(math.radians(25)):
+            continue
+        along = (mx - w.a[0]) * ux + (my - w.a[1]) * uy
+        off = abs((mx - w.a[0]) * uy - (my - w.a[1]) * ux)
+        if -0.1 <= along <= L + 0.1 and off <= max_dist and (best is None or off < best[0]):
+            width = abs(seg[0] * ux + seg[1] * uy)
+            best = (off, w, along, width)
+    if best is None:
+        raise ValueError(f"no wall runs along ({a[0]:.2f}, {a[1]:.2f})-({b[0]:.2f}, {b[1]:.2f}) within {max_dist} m; "
+                         "add or move the wall first")
+    _, w, along, width = best
+    width = min(width, w.length)
+    along = min(max(along, width / 2), w.length - width / 2)
+    defaults = {"top": 2.03} if kind == "door" else {"bottom": 0.9, "top": 2.1, "swing": "none"}
+    return Opening(id=opening_id, kind=kind, wall=w.id, center=along, width=width, **{**defaults, **fields})
+
+
+def add_opening(room: Room, op: Opening) -> Room:
+    r = room.model_copy(deep=True)
+    if any(o.id == op.id for o in r.openings):
+        raise ValueError(f"opening {op.id!r} already exists")
+    r.wall(op.wall)
+    r.openings.append(op)
+    return r
+
+
+def update_opening(room: Room, opening_id: str, **fields) -> Room:
+    r = room.model_copy(deep=True)
+    idx = next((i for i, o in enumerate(r.openings) if o.id == opening_id), None)
+    if idx is None:
+        raise KeyError(f"no opening {opening_id!r}")
+    op = Opening.model_validate({**r.openings[idx].model_dump(), **fields})
+    r.wall(op.wall)
+    r.openings[idx] = op
+    return r
+
+
+def delete_opening(room: Room, opening_id: str) -> Room:
+    r = room.model_copy(deep=True)
+    if not any(o.id == opening_id for o in r.openings):
+        raise KeyError(f"no opening {opening_id!r}")
+    r.openings = [o for o in r.openings if o.id != opening_id]
+    return r

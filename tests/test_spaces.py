@@ -183,3 +183,17 @@ def test_solver_keeps_objects_in_their_space(apt):
                        space="bedroom")
     p = res.poses["armchair_1"]
     assert apt.room.space_at(p.x, p.y).id == "bedroom"
+
+
+def test_doors_from_floor_points(aclient):
+    c = aclient
+    # jambs measured on the floor next to the kitchen's east wall (x = 8)
+    r = c.post(f"/api/scenes/{A}/openings", json={"id": "pantry_door", "a": [7.93, 1.2], "b": [7.95, 1.96],
+                                                   "swing": "out", "hinge": "left"})
+    assert r.status_code == 200, r.text
+    op = next(o for o in c.get(f"/api/scenes/{A}/room").json()["openings"] if o["id"] == "pantry_door")
+    assert op["wall"] == "kitchen.2" and abs(op["width"] - 0.76) < 0.01 and abs(op["center"] - 1.58) < 0.01
+    assert c.post(f"/api/scenes/{A}/openings", json={"a": [3.0, 3.0], "b": [3.0, 3.8]}).status_code == 422  # no wall there
+    assert c.patch(f"/api/scenes/{A}/openings/pantry_door", json={"width": 0.8}).status_code == 200
+    assert c.delete(f"/api/scenes/{A}/openings/pantry_door", headers={"X-Actor": "agent"}).status_code == 403
+    assert c.delete(f"/api/scenes/{A}/openings/pantry_door").status_code == 200

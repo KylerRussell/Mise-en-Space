@@ -126,6 +126,22 @@ class MergeBody(BaseModel):
     other: str
 
 
+class OpeningBody(BaseModel):
+    """A door or window: either on a wall (wall + center + width) or from two floor points
+    (a, b: e.g. the jambs) that snap onto the nearest parallel wall."""
+    id: str | None = None
+    kind: Literal["door", "window"] = "door"
+    wall: str | None = None
+    center: float | None = None
+    width: float | None = None
+    a: tuple[float, float] | None = None
+    b: tuple[float, float] | None = None
+    bottom: float | None = None
+    top: float | None = None
+    swing: Literal["in", "out", "none", "sliding"] | None = None
+    hinge: Literal["left", "right"] | None = None
+
+
 # ---- jobs (Stage 4 imports run in a thread) ----------------------------------------
 
 class Job(BaseModel):
@@ -305,6 +321,37 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         scene_or_404(scene_id)
         return guard(store.edit_room, scene_id, lambda r: spaces_mod.merge_spaces(r, space_id, body.other),
                      actor_of(x_actor), f"merge {body.other} into {space_id}")
+
+    @app.post("/api/scenes/{scene_id}/openings")
+    def add_opening(scene_id: str, body: OpeningBody, x_actor: str | None = Header(None)):
+        from ..scene.models import Opening
+        s = scene_or_404(scene_id)
+        oid = body.id or spaces_mod.slug(body.kind, {o.id for o in s.room.openings})
+        extra = body.model_dump(exclude_none=True, include={"bottom", "top", "swing", "hinge"})
+
+        def fn(r):
+            if body.a is not None and body.b is not None:
+                op = spaces_mod.door_from_points(r, body.a, body.b, opening_id=oid, kind=body.kind, **extra)
+            elif body.wall and body.center is not None and body.width:
+                op = Opening(id=oid, kind=body.kind, wall=body.wall, center=body.center, width=body.width, **extra)
+            else:
+                raise ValueError("give a and b (floor points), or wall, center and width")
+            return spaces_mod.add_opening(r, op)
+        out = guard(store.edit_room, scene_id, fn, actor_of(x_actor), f"add {body.kind} {oid}")
+        return {**out, "opening_id": oid}
+
+    @app.patch("/api/scenes/{scene_id}/openings/{opening_id}")
+    def update_opening(scene_id: str, opening_id: str, body: OpeningBody, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        fields = body.model_dump(exclude_none=True, exclude={"id", "a", "b"})
+        return guard(store.edit_room, scene_id, lambda r: spaces_mod.update_opening(r, opening_id, **fields),
+                     actor_of(x_actor), f"update {opening_id}")
+
+    @app.delete("/api/scenes/{scene_id}/openings/{opening_id}")
+    def delete_opening(scene_id: str, opening_id: str, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        return guard(store.edit_room, scene_id, lambda r: spaces_mod.delete_opening(r, opening_id),
+                     actor_of(x_actor), f"delete {opening_id}")
 
     @app.delete("/api/scenes/{scene_id}/spaces/{space_id}")
     def delete_space(scene_id: str, space_id: str, x_actor: str | None = Header(None)):
