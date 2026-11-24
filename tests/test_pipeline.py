@@ -142,3 +142,43 @@ def test_fit_level_rectangle_from_clicked_corners():
     s = rect.scale_for(0.3048)
     assert abs(s - k) / k < 0.03
     assert abs(rect.long_side * s - 0.476) < 0.02 and abs(rect.height * s - 0.28) < 0.02
+
+
+def test_align_by_time_recovers_rotation_scale_offset():
+    """Two solves of overlapping video: the second lands in the first's metric frame."""
+    from types import SimpleNamespace as NS
+
+    from mise.pipeline import sfm_scene
+
+    def rz(d):
+        a = np.radians(d)
+        return np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]])
+
+    def rec_from(centers, rots, names):
+        ims = {}
+        for k, (c, Rwc, n) in enumerate(zip(centers, rots, names)):
+            Rcw = Rwc.T
+            ims[k] = NS(name=n, projection_center=lambda c=c: c, points2D=[],
+                        cam_from_world=lambda Rcw=Rcw: NS(rotation=NS(matrix=lambda: Rcw)))
+        return NS(images=ims, points3D={})
+
+    T = np.linspace(0, 20, 61)
+    path = np.c_[np.cos(T / 4) * 2, np.sin(T / 3) * 1.5, 1.4 + 0.05 * np.sin(T)]  # metric, leveled
+    looks = [rz(10 * t) for t in T]
+    ref_names = [f"a{k:03d}" for k in range(len(T))]
+    ref_rec = rec_from(path, looks, ref_names)
+    ref = sfm_scene.Leveled(R=np.eye(3), t=np.zeros(3), scale=1.0, points=np.zeros((0, 3)), point_ids=np.zeros(0),
+                            cams=path, image_names=ref_names, sights=[np.zeros((0, 3))] * len(T), yaw_deg=0.0)
+    # the second solve: other frames (offset in time), its own arbitrary frame and units
+    Rm, sm, tm = rz(70) @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]]), 2.5, np.array([3.0, -1.0, 0.5])
+    T2 = T[10:50] + 0.05
+    path2 = np.c_[np.cos(T2 / 4) * 2, np.sin(T2 / 3) * 1.5, 1.4 + 0.05 * np.sin(T2)]
+    model = (path2 * sm) @ Rm.T + tm
+    rots = [Rm @ rz(10 * t) for t in T2]
+    names2 = [f"b{k:03d}" for k in range(len(T2))]
+    rec = rec_from(model, rots, names2)
+    times = {**dict(zip(ref_names, T)), **dict(zip(names2, T2))}
+    lev, rep = sfm_scene.align_by_time(ref_rec, ref, times, rec, times)
+    assert rep["used"] >= 30
+    assert np.allclose(lev.R, Rm.T, atol=0.02) and abs(lev.scale - 1 / sm) < 1e-3  # 0.05 s apart while turning 10°/s
+    assert np.abs(lev.cams - path2).max() < 0.03
