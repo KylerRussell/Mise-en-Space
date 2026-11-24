@@ -1,0 +1,97 @@
+import numpy as np
+
+from mise.pipeline import decompose, normalize, ply, scale
+
+
+def _gauss(xyz):
+    n = len(xyz)
+    return ply.Splat(xyz=xyz.astype(np.float32), f_dc=np.zeros((n, 3), np.float32), opacity=np.full(n, 4.0, np.float32),
+                     scale=np.full((n, 3), np.log(0.01), np.float32), rot=np.tile([1, 0, 0, 0], (n, 1)).astype(np.float32))
+
+
+def test_ply_roundtrip_and_transform(tmp_path):
+    rng = np.random.default_rng(0)
+    s = _gauss(rng.normal(size=(100, 3)))
+    s.f_rest = rng.normal(size=(100, 45)).astype(np.float32)
+    ply.write_ply(tmp_path / "a.ply", s)
+    r = ply.read_ply(tmp_path / "a.ply")
+    assert np.allclose(r.xyz, s.xyz) and r.f_rest.shape == (100, 45)
+    t = ply.transform(r, R=ply.rot_z(90), t=np.array([1, 2, 3]), scale=2.0)
+    assert np.allclose(t.xyz[0], 2 * ply.rot_z(90) @ r.xyz[0] + [1, 2, 3], atol=1e-5)
+    assert np.allclose(t.scale, r.scale + np.log(2.0))
+    assert np.allclose(np.linalg.norm(t.rot, axis=1), 1, atol=1e-5)
+
+
+def _room_points(rng, tilt_deg=8.0, yaw_deg=23.0, scale_units=0.5):
+    """A 4 x 3 m room (floor + 4 walls), then tilted, rotated and scaled into 'reconstruction units'."""
+    n = 6000
+    floor = np.c_[rng.uniform(0, 4, n), rng.uniform(0, 3, n), np.zeros(n)]
+    walls = []
+    for x in (0, 4):
+        walls.append(np.c_[np.full(n // 4, x), rng.uniform(0, 3, n // 4), rng.uniform(0, 2.5, n // 4)])
+    for y in (0, 3):
+        walls.append(np.c_[rng.uniform(0, 4, n // 4), np.full(n // 4, y), rng.uniform(0, 2.5, n // 4)])
+    pts = np.vstack([floor, *walls])
+    a = np.radians(tilt_deg)
+    Rx = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+    pts = (pts @ ply.rot_z(yaw_deg).T) @ Rx.T
+    return pts / scale_units + np.array([3.0, -1.0, 7.0])
+
+
+def test_normalize_recovers_metric_z_up_axis_aligned():
+    rng = np.random.default_rng(0)
+    s = _gauss(_room_points(rng))
+    out, res = normalize.normalize(s, scale=0.5, up_hint=(0, 0, 1))
+    p = out.xyz.astype(np.float64)
+    assert abs(np.percentile(p[:, 2], 1)) < 0.03  # floor at z = 0
+    ext = np.sort(np.percentile(p[:, :2], 99, axis=0) - np.percentile(p[:, :2], 1, axis=0))
+    assert np.allclose(ext, [2.94, 3.92], atol=0.08)  # walls on axes -> tight extents
+
+
+def test_scale_from_markers_and_held_out():
+    rng = np.random.default_rng(0)
+    K = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1.0]])
+    true_scale = 2.0  # meters per model unit
+    side = 0.15
+    corners_m = np.array([[0, 0, 0], [side, 0, 0], [side, side, 0], [0, side, 0]]) + [1.0, 1.0, 0]
+    corners_model = corners_m / true_scale
+    cams, dets = {}, {}
+    for i in range(5):
+        R = ply.rot_z(10 * i) @ np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1.0]])
+        C = np.array([0.5 + 0.05 * i, 0.5, 1.5])  # camera center (model units) above the marker
+        t = -R @ C
+        cams[f"f{i}"] = scale.Camera(K=K, R=R, t=t)
+        uv = []
+        for X in corners_model:
+            x = K @ (R @ X + t)
+            uv.append(x[:2] / x[2] + rng.normal(0, 0.1, 2))
+        dets[f"f{i}"] = {7: np.array(uv)}
+    ms = scale.marker_scales(cams, dets, side)
+    assert len(ms) == 1 and abs(ms[0].scale - true_scale) / true_scale < 0.01
+    held = [scale.HeldOut("room length", (0, 0, 0), (4.2 / true_scale, 0, 0), 4.2)]
+    rep = scale.build_report(ms, held)
+    assert rep.verdict == "pass" and abs(rep.held_out[0]["error_pct"]) < 1
+
+
+def test_decompose_package(tmp_path):
+    rng = np.random.default_rng(0)
+    room = np.c_[rng.uniform(0, 4, 8000), rng.uniform(0, 3, 8000), rng.uniform(-0.01, 0.01, 8000)]
+    # a 1.2 x 0.6 x 0.75 'desk' rotated 30°, centered at (2, 1.5)
+    loc = np.c_[rng.uniform(-0.6, 0.6, 3000), rng.uniform(-0.3, 0.3, 3000), rng.uniform(0, 0.75, 3000)]
+    desk = loc @ ply.rot_z(30).T + [2, 1.5, 0]
+    s = _gauss(np.vstack([room, desk]))
+    labels = np.r_[np.zeros(len(room), int), np.ones(len(desk), int)]
+    bg, objs = decompose.split_instances(s, labels)
+    box = decompose.oriented_box(objs[1])
+    assert np.allclose([box.w, box.d, box.h], [1.2, 0.6, 0.75], atol=0.03)
+    cleaned, hole = decompose.remove_with_shadow(bg, [box])
+    assert hole.sum() > 0
+    filled = decompose.fill_floor_plane(cleaned, [box.footprint(0.15)])
+    assert len(filled) > len(cleaned)
+    sc = decompose.package(tmp_path / "out", filled, {"desk_1": (objs[1], "Desk", "desk")},
+                           decompose.floor_polygon_from_splat(filled), 2.5)
+    assert (tmp_path / "out/objects/desk_1.ply").exists() and (tmp_path / "out/layout.json").exists()
+    o = sc.objects[0]
+    assert np.isclose(o.pose.x, 2, atol=0.03) and np.isclose(o.dims.w, 1.2, atol=0.03)
+    canon = ply.read_ply(tmp_path / "out/objects/desk_1.ply").xyz
+    assert np.allclose(np.ptp(canon[:, :2], axis=0), [1.2, 0.6], atol=0.03)

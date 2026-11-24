@@ -1,0 +1,11 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+node_modules/
+editor/dist/
+data/
+*.ply
+*.glb
+!examples/**/*.ply
+.env

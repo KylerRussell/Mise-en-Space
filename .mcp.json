@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mise": {
+      "command": "mise",
+      "args": ["mcp"],
+      "env": { "MISE_BACKEND": "http://127.0.0.1:8765" }
+    }
+  }
+}
