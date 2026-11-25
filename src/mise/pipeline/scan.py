@@ -120,23 +120,73 @@ class ScanResult:
 # ---- the stages ------------------------------------------------------------------------
 
 def _frames(video: Path, work: Path, opts: ScanOptions, ev: ScanEvents) -> list[dict]:
-    import cv2
-
     from .video import extract_sharp_frames, probe
 
     info = probe(video)
     ev.emit("video", duration_s=info["duration_s"], width=info["width"], height=info["height"])
     fdir = work / "frames"
     kept = extract_sharp_frames(video, fdir, target_fps=opts.fps, oversample=2, width=opts.width, t0=opts.t0, t1=opts.t1)
-    thumbs = work / "thumbs"
-    thumbs.mkdir(exist_ok=True)
-    for k in kept:
-        img = cv2.imread(str(fdir / k["name"]))
-        cv2.imwrite(str(thumbs / k["name"]), cv2.resize(img, (240, round(240 * img.shape[0] / img.shape[1]))),
-                    [cv2.IMWRITE_JPEG_QUALITY, 70])
+    _thumbs(work, kept)
     (work / "frames.json").write_text(json.dumps(kept))
     ev.emit("frames", frames=[{"name": k["name"], "t": round(k["t"], 2)} for k in kept])
     return kept
+
+
+def _thumbs(work: Path, kept: list[dict]) -> None:
+    import cv2
+
+    thumbs = work / "thumbs"
+    thumbs.mkdir(exist_ok=True)
+    for k in kept:
+        img = cv2.imread(str(work / "frames" / k["name"]))
+        cv2.imwrite(str(thumbs / k["name"]), cv2.resize(img, (240, round(240 * img.shape[0] / img.shape[1]))),
+                    [cv2.IMWRITE_JPEG_QUALITY, 70])
+
+
+def import_poses(poses: Path, work: Path, frames_src: Path | None = None) -> dict:
+    """Put a camera solve made elsewhere into the work folder, so a `resume` run builds the home from it.
+
+    `poses` is what scripts/colab/learned_recon.py writes: frames.json ([{"name", "t"}]), a COLMAP
+    model in sparse/0 (text or binary) and meta.json (model, whether its scale is metric). The
+    frames it names are copied from `frames_src` (default: poses/frames). Earlier frames and
+    solves in the work folder are replaced. Returns meta.json (empty if there is none).
+    """
+    import shutil
+
+    import pycolmap
+
+    poses, work = Path(poses), Path(work)
+    meta = json.loads((poses / "meta.json").read_text()) if (poses / "meta.json").exists() else {}
+    kept = json.loads((poses / "frames.json").read_text())
+    src = Path(frames_src) if frames_src else poses / "frames"
+    if kept and not (src / kept[0]["name"]).exists() and (src / "frames").is_dir():
+        src = src / "frames"  # the pick folder (frames/ + frames.json), as run_learned_recon.py takes it
+    missing = [k["name"] for k in kept if not (src / k["name"]).exists()]
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} frames named in {poses / 'frames.json'} are not in {src} "
+                                f"(first: {missing[0]}); pass the folder they were picked into")
+    model = poses / "sparse" / "0"
+    if not model.exists():
+        raise FileNotFoundError(f"no COLMAP model at {model}")
+    rec = pycolmap.Reconstruction(str(model))
+    unknown = {im.name for im in rec.images.values()} - {k["name"] for k in kept}
+    if unknown:
+        raise ValueError(f"the model has {len(unknown)} images not in frames.json (first: {sorted(unknown)[0]})")
+    work.mkdir(parents=True, exist_ok=True)
+    for old in ("frames", "thumbs", "frames_eq", "sparse"):
+        if (work / old).exists():
+            shutil.rmtree(work / old)
+    (work / "database.db").unlink(missing_ok=True)
+    (work / "frames").mkdir()
+    for k in kept:
+        shutil.copy2(src / k["name"], work / "frames" / k["name"])
+    _thumbs(work, kept)
+    (work / "frames.json").write_text(json.dumps(kept))
+    out = work / "sparse" / "0"
+    out.mkdir(parents=True)
+    rec.write_binary(str(out))
+    (work / "poses_meta.json").write_text(json.dumps(meta, indent=1))
+    return meta
 
 
 def _check(work: Path, kept: list[dict], ev: ScanEvents) -> list:

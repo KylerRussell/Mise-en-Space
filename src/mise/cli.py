@@ -11,6 +11,7 @@
   mise import-product SCENE URL     Stage 4: product page -> sized library asset
   mise stage-commands CAPTURE_DIR   print the Nerfstudio commands for a capture
   mise scan VIDEO --scene ID        walkthrough video -> base layout (rooms, doors, built-ins, finishes)
+            [--poses DIR]           ... with cameras solved elsewhere (scripts/colab/run_learned_recon.py)
 """
 
 from __future__ import annotations
@@ -181,6 +182,16 @@ def cmd_scan(args):
                                                "created": time.time()}))
     opts = ScanOptions(scene_id=args.scene, name=args.name, fps=args.fps, scale=args.scale, t0=args.t0, t1=args.t1,
                        resume=args.resume)
+    if args.poses:  # a solve made elsewhere (scripts/colab/learned_recon.py): import it, then carry on as --resume
+        from .pipeline.scan import import_poses
+
+        meta = import_poses(Path(args.poses), work, Path(args.frames) if args.frames else None)
+        opts.resume = True
+        if opts.scale is None and meta.get("metric"):
+            opts.scale = 1.0
+        print(f"imported {meta.get('frames', '?')} frames solved by {meta.get('model_id', 'an outside model')}"
+              f" ({'metric, --scale 1.0' if opts.scale == 1.0 else 'scale from camera height' if opts.scale is None else f'--scale {opts.scale}'})",
+              flush=True)
     res = run_scan(Path(args.video), work, opts, store=_store(args), ev=ScanEvents(work / "events.jsonl", show))
     print(json.dumps(res.to_dict(), indent=1, default=str))
 
@@ -215,6 +226,9 @@ def main(argv=None):
     a.add_argument("--fps", type=float, default=3.0); a.add_argument("--scale", type=float, help="known scale (markers/LiDAR); default: from camera height")
     a.add_argument("--t0", type=float); a.add_argument("--t1", type=float); a.add_argument("--work", help="work folder (default: next to the scene store)")
     a.add_argument("--resume", action="store_true", help="reuse the frames and camera solve from the last run in the work folder")
+    a.add_argument("--poses", help="use this camera solve instead of solving: a folder from scripts/colab/learned_recon.py "
+                   "(frames.json, sparse/0, meta.json)")
+    a.add_argument("--frames", help="with --poses: folder holding the frames it names (default: POSES/frames)")
     a.set_defaults(fn=cmd_scan)
 
     args = p.parse_args(argv)

@@ -123,6 +123,20 @@ up there too. The *Live coach* tab checks your phone camera's view while you fil
 at once when the footage won't map (the camera needs https on a phone). Scans stay on your
 computer, under `scans/` next to the scene store (`MISE_SCANS` to move it).
 
+**Camera solve from a learned model (Colab GPU).** Where COLMAP collapses (turning on the
+spot, plain walls), a feed-forward model can solve the cameras instead:
+
+```bash
+python scripts/colab/run_learned_recon.py bedroom --t0 134 --t1 182   # MapAnything on a Colab GPU
+mise scan walkthrough.mp4 --scene my-flat --poses data/scans/learned/bedroom --frames data/scans/tour-frames
+```
+
+The first command uploads the stretch's frames (already picked by mise into `--frames`) to a
+Colab VM through the `colab` CLI, runs `scripts/colab/learned_recon.py` there, downloads a
+COLMAP model with points from each frame's depth, and stops the VM. `--poses` imports it and
+carries on as `--resume`, with `--scale 1.0` when the model's scale is metric (MapAnything).
+`--model vggt` and `--gpu H100` choose others; runs with different names can go at once.
+
 ## Scan to scene with splats (once you have a capture)
 
 ```bash
