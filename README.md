@@ -95,7 +95,35 @@ The AI (header `X-Actor: agent`) may write only to variants and never moves lock
 You promote its changes into `main` from the editor, one change at a time, and every
 change is an undoable operation in `ops.jsonl`.
 
-## Scan to scene (once you have a capture)
+**Empty home or with built-ins.** Objects marked `fixture` are part of the home rather than
+furniture: cabinets and counters, appliances, plumbing, light fixtures. They stay locked, the
+checks keep them, and the AI works around them. The editor's *Empty home / With built-ins*
+switch (or `?fixtures=0`) shows the bare shell or the home as it really is; renders take
+`fixtures=false` too. `support` may be `ceiling` for hanging fixtures.
+
+## Scan a walkthrough video
+
+```bash
+mise scan walkthrough.mp4 --scene my-flat --name "My flat"
+```
+
+One command takes the video to a draft base layout: sharp frames, footage checks, features on
+contrast-boosted frames, neighbor and revisit (loop) matching, camera solve, scale from the
+phone's usual height (or `--scale` from markers or LiDAR), joining solved pieces, rooms and
+doorways, walls traced along furniture moved back to the wall, counters found as built-ins,
+floor and wall finishes sampled from the frames, and the scene written to the store. Anything
+it had to guess is reported as an issue with the stretch of video it came from.
+
+**Watching a scan.** With `mise serve` running, open http://127.0.0.1:8765/scan.html to
+upload a video and watch each stage live: a timeline colors every frame by footage quality
+and by whether it mapped, the plan fills in with the camera path, points and rooms, and the
+issue list shows a frame and advice for each problem (turning on the spot, lost track, plain
+views, stretches that could not be joined). Scans started with `mise scan` in a terminal show
+up there too. The *Live coach* tab checks your phone camera's view while you film and tells you
+at once when the footage won't map (the camera needs https on a phone). Scans stay on your
+computer, under `scans/` next to the scene store (`MISE_SCANS` to move it).
+
+## Scan to scene with splats (once you have a capture)
 
 ```bash
 mise stage-commands path/to/capture --source record3d

@@ -40,14 +40,18 @@ def sharpness(gray: np.ndarray) -> float:
 
 
 def extract_sharp_frames(video: Path, out_dir: Path, target_fps: float = 1.5, oversample: int = 3,
-                         width: int = 1600) -> list[dict]:
-    """Decode at target_fps * oversample, keep the sharpest frame of each group of `oversample`."""
+                         width: int = 1600, t0: float | None = None, t1: float | None = None) -> list[dict]:
+    """Decode at target_fps * oversample, keep the sharpest frame of each group of `oversample`.
+
+    t0 / t1 (seconds) decode only that stretch; times in the result stay video times.
+    """
     import cv2
 
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = out_dir / "_all"
     tmp.mkdir(exist_ok=True)
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf",
+    span = (["-ss", f"{t0:.3f}"] if t0 else []) + (["-t", f"{t1 - (t0 or 0):.3f}"] if t1 is not None else [])
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *span, "-i", str(video), "-vf",
                     f"fps={target_fps * oversample},scale={width}:-2", "-q:v", "2", str(tmp / "f_%05d.jpg")], check=True)
     cands = sorted(tmp.glob("f_*.jpg"))
     kept = []
@@ -60,7 +64,7 @@ def extract_sharp_frames(video: Path, out_dir: Path, target_fps: float = 1.5, ov
         s, best = max(scored)
         name = f"frame_{len(kept):04d}.jpg"
         best.rename(out_dir / name)
-        kept.append({"name": name, "t": (k + scored.index((s, best))) / (target_fps * oversample), "sharpness": s,
+        kept.append({"name": name, "t": (t0 or 0) + (k + scored.index((s, best))) / (target_fps * oversample), "sharpness": s,
                      "group_min_sharpness": min(x[0] for x in scored)})
     for p in tmp.glob("*"):
         p.unlink()

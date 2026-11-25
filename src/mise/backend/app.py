@@ -154,9 +154,12 @@ class Job(BaseModel):
     question: str | None = None
 
 
-def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=None, image_fetcher=None) -> FastAPI:
+def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=None, image_fetcher=None,
+               scans_dir: Path | None = None, scan_runner=None) -> FastAPI:
     """generator: Stage 4 image-to-3D client (defaults to Idol if FAL_KEY is set).
-    listing_fetcher / image_fetcher: injectable for tests (default: fetch over HTTP)."""
+    listing_fetcher / image_fetcher: injectable for tests (default: fetch over HTTP).
+    scans_dir: where scan jobs keep their video and work files (default: next to the scene store).
+    scan_runner: the scan pipeline (injectable for tests)."""
     store = SceneStore(data_dir or DATA_DIR)
     loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
 
@@ -588,6 +591,10 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         if base not in p.parents or not p.is_file():
             raise HTTPException(404)
         return FileResponse(p)
+
+    from . import scans as scans_mod
+    scans_mod.register(app, store, Path(scans_dir or os.environ.get("MISE_SCANS") or store.root.parent / "scans"),
+                       lambda: loop_holder.get("loop"), scan_runner)
 
     @app.get("/healthz")
     def health():

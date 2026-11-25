@@ -10,6 +10,7 @@
   mise package ...                  Stage 2: split labeled splat into room + objects + scene.json
   mise import-product SCENE URL     Stage 4: product page -> sized library asset
   mise stage-commands CAPTURE_DIR   print the Nerfstudio commands for a capture
+  mise scan VIDEO --scene ID        walkthrough video -> base layout (rooms, doors, built-ins, finishes)
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -72,6 +74,7 @@ def cmd_scale_report(args):
     """Inputs: COLMAP text model, detections JSON (from `mise detect-markers`) and held-out JSON:
     [{"name": "room length", "a": [x,y,z], "b": [x,y,z], "tape_m": 4.212}, ...]"""
     import numpy as np
+
     from .pipeline import scale
     held = [scale.HeldOut(**h) for h in json.loads(Path(args.held_out).read_text())] if args.held_out else []
     markers = []
@@ -105,6 +108,7 @@ def cmd_normalize(args):
 
 def cmd_package(args):
     import numpy as np
+
     from .pipeline import decompose, ply
     from .scene.models import Opening
     s = ply.read_ply(args.splat)
@@ -152,6 +156,34 @@ def cmd_stage_commands(args):
     print(external.NOTES)
 
 
+def cmd_scan(args):
+    from .pipeline.scan import STAGES, ScanEvents, ScanOptions, run_scan
+
+    work = Path(args.work or Path(args.data).parent / "scans" / args.scene)
+    labels = dict(STAGES)
+
+    def show(ev):
+        k = ev["kind"]
+        if k == "stage":
+            extra = {x: v for x, v in ev.items() if x not in ("seq", "time", "kind", "stage", "status")}
+            print(f"[{ev['status']:>7}] {labels.get(ev['stage'], ev['stage'])} {json.dumps(extra) if extra else ''}", flush=True)
+        elif k == "progress" and "registered" in ev:
+            print(f"          solved {ev['registered']} of {ev['of']} frames", flush=True)
+        elif k == "issue":
+            span = f" {ev['t0']:.0f}-{ev['t1']:.0f} s" if ev.get("t0") is not None else ""
+            print(f"  ! {ev['severity']} {ev['issue']}{span}: {ev['message']}", flush=True)
+        elif k == "error":
+            print(f"  x {ev['message']}", flush=True)
+
+    work.mkdir(parents=True, exist_ok=True)
+    # so the scan monitor (mise serve, /scan.html) can follow this run
+    (work / "job.json").write_text(json.dumps({"id": f"cli_{work.name}"[:64], "scene_id": args.scene, "name": args.name,
+                                               "created": time.time()}))
+    opts = ScanOptions(scene_id=args.scene, name=args.name, fps=args.fps, scale=args.scale, t0=args.t0, t1=args.t1)
+    res = run_scan(Path(args.video), work, opts, store=_store(args), ev=ScanEvents(work / "events.jsonl", show))
+    print(json.dumps(res.to_dict(), indent=1, default=str))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mise", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", default=os.environ.get("MISE_DATA", "data/scenes"), help="scene store directory")
@@ -177,6 +209,11 @@ def main(argv=None):
     a = sub.add_parser("import-product"); a.add_argument("scene"); a.add_argument("url"); a.add_argument("--category", default="furniture")
     a.add_argument("--dims"); a.add_argument("--mesh", action="store_true"); a.set_defaults(fn=cmd_import)
     a = sub.add_parser("stage-commands"); a.add_argument("capture"); a.add_argument("--source", default="video", choices=["video", "images", "record3d", "polycam"]); a.set_defaults(fn=cmd_stage_commands)
+
+    a = sub.add_parser("scan"); a.add_argument("video"); a.add_argument("--scene", required=True); a.add_argument("--name", default="Scanned home")
+    a.add_argument("--fps", type=float, default=3.0); a.add_argument("--scale", type=float, help="known scale (markers/LiDAR); default: from camera height")
+    a.add_argument("--t0", type=float); a.add_argument("--t1", type=float); a.add_argument("--work", help="work folder (default: next to the scene store)")
+    a.set_defaults(fn=cmd_scan)
 
     args = p.parse_args(argv)
     args.fn(args)

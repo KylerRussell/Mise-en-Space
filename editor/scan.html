@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scan Monitor</title>
+    <link rel="stylesheet" href="/src/scan.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">Mise-en-Space <span class="dim">· Scan</span></div>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="jobs" class="on">Scan a video</button>
+        <button role="tab" data-tab="coach">Live coach</button>
+      </nav>
+      <div class="spacer"></div>
+      <a class="link" href="/">Open the editor</a>
+    </header>
+
+    <main id="tab-jobs" class="jobs">
+      <aside class="side">
+        <form id="new-scan" class="card">
+          <h2>New scan</h2>
+          <label class="drop" id="drop">
+            <input type="file" id="video" accept="video/*" />
+            <span id="drop-text"><b>Choose a walkthrough video</b><br /><span class="dim">or drop it here</span></span>
+          </label>
+          <label class="field">Scene id <input id="scene-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="my-flat" /></label>
+          <label class="field">Name <input id="scene-name" placeholder="My flat" /></label>
+          <details>
+            <summary>Options</summary>
+            <div class="row">
+              <label class="field">From (s) <input id="t0" type="number" min="0" step="1" /></label>
+              <label class="field">To (s) <input id="t1" type="number" min="0" step="1" /></label>
+            </div>
+            <label class="field">Frames per second <input id="fps" type="number" min="0.5" max="6" step="0.5" value="3" /></label>
+          </details>
+          <button type="submit" class="primary" id="start">Upload and scan</button>
+          <div class="upload" id="upload" hidden><div class="bar"><i id="upload-bar"></i></div><span id="upload-text"></span></div>
+          <p class="hint">The video stays on this computer. Walk slowly along the walls, phone at chest height;
+            step through each doorway rather than turning on the spot.</p>
+        </form>
+        <section class="card">
+          <h2>Scans</h2>
+          <ul id="job-list" class="list"></ul>
+        </section>
+      </aside>
+
+      <section class="main" id="job-view">
+        <div class="empty" id="job-empty">Pick a scan, or start one with a walkthrough video.</div>
+        <div id="job" hidden>
+          <div class="job-head">
+            <div>
+              <h1 id="job-title"></h1>
+              <div class="dim" id="job-sub"></div>
+            </div>
+            <div class="spacer"></div>
+            <button id="cancel" class="danger" hidden>Cancel</button>
+            <a id="open-empty" class="btn" hidden>Empty home</a>
+            <a id="open-scene" class="btn primary" hidden>Open in editor</a>
+          </div>
+          <ol class="stages" id="stages"></ol>
+
+          <div class="card">
+            <div class="card-head"><h2>Timeline</h2><div class="legend" id="legend"></div></div>
+            <div class="timeline">
+              <canvas id="timeline" height="132"></canvas>
+              <div class="peek" id="peek" hidden><img id="peek-img" alt="" /><span id="peek-text"></span></div>
+            </div>
+          </div>
+
+          <div class="split">
+            <div class="card plan-card">
+              <div class="card-head"><h2>Plan</h2><span class="dim" id="plan-note">appears once the rooms are traced</span></div>
+              <canvas id="plan"></canvas>
+            </div>
+            <div class="card">
+              <div class="card-head"><h2>Issues</h2><span class="badge" id="issue-count">0</span></div>
+              <ul id="issues" class="issues"></ul>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <main id="tab-coach" class="coach" hidden>
+      <div class="coach-view">
+        <video id="cam" playsinline muted></video>
+        <div class="coach-banner" id="coach-banner">Start the camera, then walk the room.</div>
+        <div class="coach-strip"><canvas id="coach-strip" height="18"></canvas></div>
+      </div>
+      <div class="coach-side card">
+        <h2>Live coach</h2>
+        <p>Point your phone's camera around the room as you would for a scan. Every third of a second a frame
+          goes to this computer, which checks it the way the scan will and tells you right away when the
+          footage won't map: turning on the spot, too close, too fast, too dark.</p>
+        <div class="row">
+          <button id="coach-start" class="primary">Start camera</button>
+          <button id="coach-stop" hidden>Stop</button>
+        </div>
+        <dl class="stats" id="coach-stats"></dl>
+        <p class="hint">Phones only allow the camera on https pages or on this computer itself. To coach from a
+          phone, open this page through an https address for this computer.</p>
+      </div>
+    </main>
+
+    <script type="module" src="/src/scan.js"></script>
+  </body>
+</html>

@@ -11,6 +11,7 @@ Needs opencv and a solved reconstruction (the `poses` extra).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -196,3 +197,85 @@ def block_texture(color: str, detail: np.ndarray | None = None, block_m: tuple[f
             if x < n:
                 tex[y:y + bh, x:x + j] *= joint
     return np.clip(tex, 0, 255).astype(np.uint8), size
+
+
+# ---- automatic finishes for a scanned scene -----------------------------------------------
+
+def _best_sample(rec, leveled, patch: Patch, normal, frames_dir, px_per_m: int, top: int = 3):
+    """Sample the patch from the few views that see it best (closest, most head-on, fully in frame)."""
+    import cv2
+
+    images = sorted(rec.images.values(), key=lambda im: im.name)
+    centers = leveled.apply(np.array([im.projection_center() for im in images]))
+    scored = sorted(range(len(images)), key=lambda k: -view_quality(patch, centers[k], normal))
+    out = []
+    for k in scored[:12]:
+        im = images[k]
+        img = cv2.imread(str(Path(frames_dir) / im.name))
+        if img is None:
+            continue
+        # the solve may have used a smaller image than the file: project at the camera's size
+        cam = rec.cameras[im.camera_id]
+        if img.shape[1] != cam.width:
+            img = cv2.resize(img, (cam.width, cam.height), interpolation=cv2.INTER_AREA)
+        tex, ok = sample_patch(patch, img, colmap_projector(rec, im, leveled), px_per_m)
+        if ok > 0.98:
+            out.append(tex)
+        if len(out) >= top:
+            break
+    if not out:
+        return None
+    return np.median(np.stack(out), axis=0).astype(np.uint8)  # median of views: drops a passer-by or a glare
+
+
+def auto_finishes(rec, leveled, scene, frames_dir, scene_dir, exposure: float = 1.5, px_per_m: int = 256) -> int:
+    """Floor and wall finishes for every space, sampled from the capture. Returns spaces finished.
+
+    The floor patch is taken at the middle of the space, the wall patch on its longest wall
+    between knee and head height (above furniture, below upper cabinets). Writes textures to
+    scene_dir/finishes/ and sets ``space.finish``.
+    """
+    import cv2
+
+    from ..scene import geometry as g
+    from ..scene.models import Finish, Surface
+
+    out_dir = Path(scene_dir) / "finishes"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    done = 0
+    for sp in scene.room.spaces:
+        poly = np.array(sp.polygon, float)
+        floor = walls = None
+        # floor: the free point farthest from the walls (a pole of inaccessibility, on a grid)
+        lo, hi = poly.min(0), poly.max(0)
+        gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], 25), np.linspace(lo[1], hi[1], 25))
+        pts = np.c_[gx.ravel(), gy.ravel()]
+        inside = np.array([g.point_in_polygon(p, poly) for p in pts])
+        if inside.any():
+            pts = pts[inside]
+            d = np.min([g.points_segment_distance(pts, poly[i], poly[(i + 1) % len(poly)]) for i in range(len(poly))], axis=0)
+            c = pts[d.argmax()]
+            size = float(min(0.8, 2 * d.max() * 0.9))
+            if size >= 0.3:
+                tex = _best_sample(rec, leveled, floor_patch(c[0], c[1], size), (0, 0, 1), frames_dir, px_per_m)
+                if tex is not None:
+                    color = gain(median_color(tex), exposure)
+                    detail = tileable(tint(flat_field(tex, px_per_m * size / 4), "#808080"))
+                    name = f"floor_{sp.id}.jpg"
+                    cv2.imwrite(str(out_dir / name), tint(detail.astype(np.float32) / 128.0, color))
+                    floor = Surface(color=color, texture=f"finishes/{name}", size_m=round(size, 3))
+        ws = [w for w in scene.room.walls if w.space == sp.id]
+        if ws:
+            w = max(ws, key=lambda w: w.length)
+            width = min(0.8, w.length - 0.2)
+            n = g.wall_inward_normal(w, scene.room)
+            if width >= 0.3:
+                patch = wall_patch(w.a, w.b, (w.length - width) / 2, 0.95, width, 0.5, n, off=0.0)
+                tex = _best_sample(rec, leveled, patch, (n[0], n[1], 0), frames_dir, px_per_m)
+                if tex is not None:
+                    walls = Surface(color=gain(median_color(tex), exposure))
+        if floor or walls:
+            ceiling = Surface(color=gain(walls.color, 1.08)) if walls else None
+            sp.finish = Finish(floor=floor, walls=walls, ceiling=ceiling)
+            done += 1
+    return done
