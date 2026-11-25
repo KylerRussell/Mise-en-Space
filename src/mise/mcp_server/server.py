@@ -42,7 +42,8 @@ solve_layout. Spaces are the user's to define; you can't change them.
 Rules:
 - You can only edit variants. Start with create_variant; the user's own layout ("main")
   is read-only to you. The user promotes your changes from the editor, item by item.
-- Locked objects never move.
+- Locked objects never move. Fixtures (fixture=true: cabinets, counters, appliances, plumbing,
+  light fixtures) are part of the home: work around them, never move or remove them.
 - After each edit, read the returned violations (numeric, in meters) and fix them.
   Run check_layout before presenting a variant: aim for zero hard violations.
 - Use render_view(plan) to see the layout and render_view(eye) to judge it as a person would.
@@ -118,10 +119,13 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
                     object_id: str | None = None,
                     eye: Annotated[list[float] | None, Field(description="[x, y, z] camera position for view='eye'")] = None,
                     target: Annotated[list[float] | None, Field(description="[x, y, z] look-at point for view='eye'")] = None,
-                    space: SpaceId = None) -> list:
+                    space: SpaceId = None,
+                    fixtures: Annotated[bool, Field(description="False shows the blank slate: no built-ins")] = True) -> list:
         """Render a plan, eye-level or object close-up view with numbered labels. Returns the image and a label map.
         With `space`, the plan zooms to that space and the default eye view stands in its doorway."""
         params: dict[str, Any] = {"view": view}
+        if not fixtures:
+            params["fixtures"] = "false"
         if space:
             params["space"] = space
         if object_id:

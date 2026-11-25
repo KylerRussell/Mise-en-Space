@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from . import geometry as g
 from .checks import Violation
-from .models import Room, SceneObject
+from .models import Room, SceneObject, structural_support
 
 PALETTE = ["#4e79a7", "#f28e2b", "#59a14f", "#e15759", "#76b7b2", "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac"]
 
@@ -157,7 +157,7 @@ def render_plan(room: Room, objects: list[SceneObject], violations: list[Violati
         dr.line([P(f0 - right * o.extent().w * 0.3), P(f0 + right * o.extent().w * 0.3)], fill=(0, 0, 0, 200), width=4)
         r = max(10, px_per_m // 8)
         cx, cy = P(c)
-        if o.support != "floor" and not o.support.startswith("wall:"):
+        if not structural_support(o.support):
             cx, cy = cx + 1.6 * r, cy - 1.6 * r  # stacked: keep the label clear of its support's
             dr.line([P(c), (cx, cy)], fill=(20, 20, 20, 200), width=2)
         dr.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(20, 20, 20, 230))

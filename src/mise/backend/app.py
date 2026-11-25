@@ -484,10 +484,12 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
     @app.get("/api/scenes/{scene_id}/variants/{variant}/render")
     def render_png(scene_id: str, variant: str, view: Literal["plan", "eye", "object"] = "plan",
                    object_id: str | None = None, eye: str | None = None, target: str | None = None,
-                   labels_header: bool = True, space: str | None = None):
+                   labels_header: bool = True, space: str | None = None, fixtures: bool = True):
         s = scene_or_404(scene_id)
         variant_ok(s, variant)
         objs = s.resolve(variant)
+        if not fixtures:  # the blank slate: the bare home without its built-ins
+            objs = [o for o in objs if not o.fixture]
         e = tuple(map(float, eye.split(","))) if eye else None
         t = tuple(map(float, target.split(","))) if target else None
         png, labels = guard(render.render_view, s.room, objs, view, checks.check_objects(s.room, objs, s.rules),

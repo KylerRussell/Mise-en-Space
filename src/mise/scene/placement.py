@@ -46,8 +46,8 @@ def snap_yaw(yaw: float, step: float = 15.0) -> float:
 def support_height(support: str, objects: dict[str, SceneObject]) -> float | None:
     if support == "floor":
         return 0.0
-    if support.startswith("wall:"):
-        return None  # wall-mounted: keep z
+    if support.startswith("wall:") or support == "ceiling":
+        return None  # wall-mounted or hung from the ceiling: keep z
     base = objects.get(support)
     if base is None:
         return 0.0

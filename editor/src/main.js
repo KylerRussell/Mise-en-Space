@@ -4,7 +4,10 @@ import { snapYaw } from "./geometry.js";
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
-const state = { scene: null, variant: params.get("variant") || "main", objects: [], room: null, variants: [], selected: null, space: null };
+const state = { scene: null, variant: params.get("variant") || "main", objects: [], room: null, variants: [], selected: null, space: null,
+  fixtures: params.get("fixtures") !== "0" };
+// what the viewport and the list show: on the empty-home view, built-ins (fixture objects) are hidden
+const visible = () => state.objects.filter((o) => state.fixtures || !o.fixture);
 const SPACE_KINDS = ["living", "kitchen", "dining", "bedroom", "bathroom", "office", "hallway", "entry", "closet", "laundry", "storage", "balcony", "other"];
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -73,7 +76,7 @@ async function refresh({ room = false } = {}) {
     vp.setRoom(s, state.room);
   }
   state.objects = objects;
-  vp.setObjects(objects);
+  vp.setObjects(visible());
   renderSpaces();
   renderObjectList();
   renderWarnings(check);
@@ -191,7 +194,7 @@ $("#space-delete").onclick = () => {
 
 function renderObjectList() {
   const multi = (state.room?.spaces || []).length > 1;
-  const shown = state.objects.filter((o) => !state.space || o.space === state.space);
+  const shown = visible().filter((o) => !state.space || o.space === state.space);
   const groups = multi && !state.space
     ? [...new Set(shown.map((o) => o.space))].map((sid) => [sid, shown.filter((o) => o.space === sid)])
     : [[null, shown]];
@@ -200,7 +203,7 @@ function renderObjectList() {
     <li data-id="${esc(o.id)}" class="${o.id === state.selected ? "sel" : ""}">
       <span class="num">${o.label}</span>
       <span class="grow">${esc(o.name)}</span>
-      ${o.locked ? '<span class="pill">locked</span>' : ""}
+      ${o.fixture ? '<span class="pill fixture" title="Built in: part of the home">built-in</span>' : o.locked ? '<span class="pill">locked</span>' : ""}
       ${o.source === "product" ? '<span class="pill prod">product</span>' : ""}
       ${o.anisotropy && o.anisotropy > 1.1 ? '<span class="pill warn" title="size mismatch vs listing">size ±</span>' : ""}
     </li>`).join("")).join("");
@@ -440,3 +443,18 @@ window.addEventListener("keydown", (e) => {
 
 loadScenes().then(() => { if (params.get("view")) setView(params.get("view")); }).catch((e) => toast(e.message, "error"));
 if (params.has("debug")) window.__mise = { vp, state }; // for scripted screenshots and poking from the console
+
+// ---- empty home vs with built-ins ---------------------------------------------------
+function setFixtures(on) {
+  state.fixtures = on;
+  for (const b of document.querySelectorAll("#fixtures-seg button")) b.classList.toggle("on", (b.dataset.fixtures === "1") === on);
+  const url = new URL(location.href);
+  if (on) url.searchParams.delete("fixtures"); else url.searchParams.set("fixtures", "0");
+  history.replaceState(null, "", url);
+  const sel = state.objects.find((o) => o.id === state.selected);
+  if (sel?.fixture && !on) select(null);
+  vp.setObjects(visible());
+  renderObjectList();
+}
+for (const b of document.querySelectorAll("#fixtures-seg button")) b.onclick = () => setFixtures(b.dataset.fixtures === "1");
+setFixtures(state.fixtures);

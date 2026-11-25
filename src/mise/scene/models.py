@@ -6,7 +6,7 @@ Conventions
 * Object canonical frame: centered on x/y, z up, footprint on z = 0,
   width along local x, depth along local y, **front faces local +y**.
 * `pose.yaw` rotates the canonical frame counter-clockwise about +z.
-* `support` is ``"floor"``, ``"wall:<wall id>"`` or another object's id.
+* `support` is ``"floor"``, ``"ceiling"``, ``"wall:<wall id>"`` or another object's id.
 """
 
 from __future__ import annotations
@@ -348,6 +348,11 @@ def _point_in(x: float, y: float, poly) -> bool:
     return inside
 
 
+def structural_support(support: str) -> bool:
+    """Resting on the building itself (floor, ceiling or a wall), not on another object."""
+    return support in ("floor", "ceiling") or support.startswith("wall:")
+
+
 class SceneObject(BaseModel):
     id: str
     name: str
@@ -368,6 +373,9 @@ class SceneObject(BaseModel):
     moved_from_scan: bool = False
     upright_only: bool | None = Field(
         None, description="True: may only stand as modeled. False: may be tipped. None: category default")
+    fixture: bool = Field(
+        False, description="built in (cabinets, counters, appliances, plumbing, light fixtures): part of the home, "
+                           "not furniture. Kept in layout checks; hidden on the blank-slate view; never on a shopping list")
 
     @property
     def upright_required(self) -> bool:

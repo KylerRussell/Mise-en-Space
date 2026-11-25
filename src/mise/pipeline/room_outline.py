@@ -284,3 +284,79 @@ def outline_ceiling(points: np.ndarray | None) -> float | None:
     peak = float(e[h.argmax()] + 0.015)
     # a real ceiling layer sits at the top; a peak far below it is wall clutter (cabinets, frames)
     return peak if top - peak < 0.1 else top
+
+
+@dataclass
+class EdgeFix:
+    room: int
+    edge: int  # index of the edge's first vertex
+    moved_m: float
+    reason: str
+
+
+def push_furniture_edges(rooms: list[Outline], points: np.ndarray, low: tuple[float, float] = (0.1, 1.4),
+                         max_push: float = 1.0, min_push: float = 0.2, margin: float = 0.03,
+                         slab: float = 0.05) -> list[EdgeFix]:
+    """Move walls that are really furniture fronts back to the wall behind them (in place).
+
+    Free space stops at whatever the camera couldn't see past, so a long sideboard or bookcase
+    reads as a wall. Plain painted walls give almost no points, but furniture does: its front,
+    top and the things on it fill a layer of points that is *deep* (tens of cm) and stops at
+    the wall. A real wall's points, if any, form a thin layer at the edge. So for each edge:
+    if the low points just outside it form a deep layer with nothing beyond, the wall is at
+    the back of that layer.
+    """
+    fixes = []
+    for ri, r in enumerate(rooms):
+        poly = np.array(r.polygon, float)
+        n = len(poly)
+        others = [np.array(o.polygon) for k, o in enumerate(rooms) if k != ri]
+        moves = []
+        for i in range(n):
+            a, b = poly[i], poly[(i + 1) % n]
+            e = b - a
+            L = float(np.linalg.norm(e))
+            if L < 0.6:
+                continue
+            u = e / L
+            out = np.array([u[1], -u[0]])  # outside for CCW
+            rel = points[:, :2] - a
+            s, d = rel @ u, rel @ out
+            span = (s > 0.15) & (s < L - 0.15)
+            z = points[:, 2]
+            lo = span & (z > low[0]) & (z < low[1]) & (d > -0.1) & (d < max_push + 0.1)
+            if lo.sum() < 30:
+                continue
+            bins = np.arange(-0.1, max_push + 0.1 + slab, slab)
+            h, _ = np.histogram(d[lo], bins)
+            need = max(3, 0.02 * lo.sum())
+            k = max(j for j in range(len(h)) if h[j] >= need) if (h >= need).any() else None
+            if k is None:
+                continue
+            back = float(np.percentile(d[lo][d[lo] < bins[k + 1]], 98)) + margin
+            # a layer that keeps going (the room continues, or a doorway) is not furniture against a wall
+            beyond = span & (d > back + 0.1) & (d < back + 0.8) & (z > 0.05) & (z < 2.3)
+            if back < min_push or back > max_push or beyond.sum() > 0.05 * lo.sum():
+                continue
+            mid = (a + b) / 2 + out * back
+            if any(_inside(o, mid) for o in others):
+                continue
+            moves.append((i, out * back, int(lo.sum()), back))
+        for i, v, cnt, back in moves:
+            poly[i] = poly[i] + v
+            poly[(i + 1) % n] = poly[(i + 1) % n] + v
+            fixes.append(EdgeFix(ri, i, round(back, 2), f"{cnt} points of furniture in a {back:.2f} m deep layer"))
+        if moves:
+            x, y = poly[:, 0], poly[:, 1]
+            r.polygon = [(round(float(p), 3), round(float(q), 3)) for p, q in poly]
+            r.area_m2 = 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    return fixes
+
+
+def _inside(poly: np.ndarray, p) -> bool:
+    x, y = p
+    inside = False
+    for (x1, y1), (x2, y2) in zip(poly, np.roll(poly, -1, axis=0)):
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside

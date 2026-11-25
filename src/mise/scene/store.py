@@ -365,7 +365,7 @@ class SceneStore:
 
     def update_object(self, scene_id: str, variant: str, object_id: str, fields: dict, actor: Actor = "user") -> dict:
         """Change non-pose fields (name, locked, dims...) of an object in main or an added object."""
-        allowed = {"name", "locked", "dims", "category", "color", "warnings", "product", "asset", "asset_kind", "upright_only"}
+        allowed = {"name", "locked", "dims", "category", "color", "warnings", "product", "asset", "asset_kind", "upright_only", "fixture"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"cannot update fields {sorted(bad)}")

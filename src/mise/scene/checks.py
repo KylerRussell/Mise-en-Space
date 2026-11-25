@@ -16,7 +16,7 @@ import numpy as np
 from pydantic import BaseModel
 
 from . import geometry as g
-from .models import MAIN, Opening, Room, Scene, SceneObject
+from .models import MAIN, Opening, Room, Scene, SceneObject, structural_support
 
 # Categories that need someone to be able to walk up to them.
 NEEDS_ACCESS = {"bed", "sofa", "desk", "chair", "armchair", "wardrobe", "dresser", "table", "dining_table", "bookshelf", "cabinet"}
@@ -56,7 +56,7 @@ def _supports(a: SceneObject, b: SceneObject, by_id: dict[str, SceneObject]) -> 
     """True if a rests (directly or transitively) on b."""
     seen = set()
     cur = a
-    while cur.support not in ("floor",) and not cur.support.startswith("wall:"):
+    while not structural_support(cur.support):
         if cur.support in seen:
             return False
         seen.add(cur.support)
@@ -105,7 +105,7 @@ def check_objects(room: Room, objects: list[SceneObject], rules, only: set[str] 
                 kind="out_of_room", severity="hard", objects=[o.id], amount_m=round(amt, 3),
                 message=f"{_name(o)} extends {amt:.2f} m outside the {'floor' if multi else 'room'}",
             ))
-        elif multi and not o.support.startswith("wall:"):
+        elif multi and not o.support.startswith("wall:") and o.support != "ceiling":
             worst = max(((g.wall_crossing(fps[o.id], w), w) for w in room.walls), key=lambda t: t[0])
             if worst[0] > rules.collision_tolerance:
                 out.append(Violation(
@@ -120,7 +120,7 @@ def check_objects(room: Room, objects: list[SceneObject], rules, only: set[str] 
                 kind="out_of_room", severity="hard", objects=[o.id], amount_m=round(amt, 3),
                 message=f"{_name(o)} is {amt:.2f} m taller than the ceiling allows",
             ))
-        if o.support not in ("floor",) and not o.support.startswith("wall:") and o.support not in by_id:
+        if not structural_support(o.support) and o.support not in by_id:
             out.append(Violation(
                 kind="unsupported", severity="soft", objects=[o.id],
                 message=f"{_name(o)} rests on {o.support!r}, which is not in this layout",
@@ -133,9 +133,16 @@ def check_objects(room: Room, objects: list[SceneObject], rules, only: set[str] 
             if op.swing == "in":
                 depth = max(depth, op.width)
             zone = g.opening_zone(op, room, depth)
+            # with several spaces, the zone is only on the door's side of the wall: an object in the
+            # next room is behind the wall, not in front of the door
+            door_space = next((w.space for w in room.walls if w.id == op.wall), None) if len(room.spaces) > 1 else None
             for o in objects:
                 if (only and o.id not in only) or not _on_floor(o):
                     continue
+                if door_space:
+                    sp = room.space_at(o.pose.x, o.pose.y)
+                    if sp is not None and sp.id != door_space and not room.is_open(door_space, sp.id):
+                        continue
                 pen = g.penetration_depth(zone, fps[o.id])
                 if pen > rules.collision_tolerance:
                     out.append(Violation(

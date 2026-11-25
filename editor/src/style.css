@@ -69,6 +69,7 @@ details summary { cursor: pointer; color: var(--muted); margin: 8px 0; }
 .pill.warn { background: #fdf1dc; color: var(--warn); }
 .pill.ai { background: #ece6fb; color: #6b45c8; }
 .pill.add { background: #e6f3ea; color: var(--ok); }
+.pill.fixture { background: #e7ecf1; color: #4b6075; }
 .pill.remove { background: #fde8e8; color: var(--bad); }
 .pill.move { background: #e7f0ff; color: var(--accent); }
 .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; text-transform: none; letter-spacing: 0; }
