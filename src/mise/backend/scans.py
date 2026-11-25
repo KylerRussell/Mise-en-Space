@@ -69,6 +69,8 @@ def register(app: FastAPI, store, scans_dir: Path, get_loop: Callable[[], asynci
         size = log.stat().st_size
         if size == j.offset:
             return
+        if size < j.offset:  # the log was started over (a re-run in the same folder)
+            j.offset, j.events, j.result, j.error = 0, [], None, None
         with log.open() as f:
             f.seek(j.offset)
             chunk = f.read()
@@ -112,6 +114,8 @@ def register(app: FastAPI, store, scans_dir: Path, get_loop: Callable[[], asynci
         return jobs[job_id]
 
     def push(job: ScanJob, ev: dict) -> None:
+        if ev.get("kind") == "start":  # a new run: forget the old one
+            job.events = []
         if job.events and ev.get("seq", 0) <= job.events[-1].get("seq", -1):
             return
         job.events.append(ev)

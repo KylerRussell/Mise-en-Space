@@ -52,6 +52,7 @@ class ScanOptions:
     min_piece: int = 10  # smaller solved pieces are ignored
     t0: float | None = None  # only this stretch of the video (seconds)
     t1: float | None = None
+    resume: bool = False  # reuse the frames and solve already in the work folder
 
 
 class Cancelled(Exception):
@@ -317,15 +318,40 @@ def _merge(L, pieces):
     return np.vstack(cams), sights, np.vstack(points), names
 
 
-def detect_counters(points: np.ndarray, rooms: list, z: tuple[float, float] = (0.85, 0.97), cell: float = 0.05,
+def counter_layer(points: np.ndarray, lo: float = 0.76, hi: float = 1.02, step: float = 0.02) -> float | None:
+    """Height of the densest horizontal layer of points where counters sit (standard 0.90-0.92 m).
+
+    The search window is wide because the scale from camera height can be ~10% off.
+    """
+    z = points[:, 2]
+    zz = z[(z > lo - 0.1) & (z < hi + 0.1)]
+    if len(zz) < 100:
+        return None
+    centers = np.arange(lo, hi + 1e-9, step)
+    counts = np.array([((zz > c - 0.03) & (zz < c + 0.03)).sum() for c in centers])
+    # a layer, not a slope: the peak must stand out from the band around it
+    k = int(counts.argmax())
+    if counts[k] < 1.4 * np.median(counts):
+        return None
+    sel = zz[(zz > centers[k] - 0.03) & (zz < centers[k] + 0.03)]
+    return float(np.median(sel))
+
+
+def detect_counters(points: np.ndarray, rooms: list, z: tuple[float, float] | None = None, cell: float = 0.05,
                     min_area: float = 0.35, min_density: int = 3) -> list[dict]:
     """Counter tops: dense, flat layers of points at counter height (sinks, islands, runs of cabinets).
 
-    Tables and desks sit lower (~0.75 m); a sideboard can still pass, so every hit is a
-    candidate to confirm. Returns boxes {x0, y0, x1, y1, top}.
+    z: the height band; by default around the densest layer near counter height. Tables and
+    desks sit lower (~0.75 m); a sideboard can still pass, so every hit is a candidate to
+    confirm. Returns boxes {x0, y0, x1, y1, top}.
     """
     import cv2
 
+    if z is None:
+        top = counter_layer(points)
+        if top is None:
+            return []
+        z = (top - 0.05, top + 0.05)
     band = points[(points[:, 2] > z[0]) & (points[:, 2] < z[1])]
     if len(band) < 50:
         return []
@@ -400,7 +426,12 @@ def run_scan(video: Path, work: Path, opts: ScanOptions, store=None, ev: ScanEve
     try:
         current = "frames"
         ev.stage("frames", "running")
-        kept = _frames(Path(video), work, opts, ev)
+        resume = opts.resume and (work / "frames.json").exists() and any((work / "sparse").glob("*/images.bin"))
+        if resume:  # keep the frames and the solve from the last run; redo everything after
+            kept = json.loads((work / "frames.json").read_text())
+            ev.emit("frames", frames=[{"name": k["name"], "t": round(k["t"], 2)} for k in kept])
+        else:
+            kept = _frames(Path(video), work, opts, ev)
         if len(kept) < 20:
             raise RuntimeError(f"only {len(kept)} frames: film at least a minute, walking slowly")
         times = {k["name"]: k["t"] for k in kept}
@@ -412,13 +443,21 @@ def run_scan(video: Path, work: Path, opts: ScanOptions, store=None, ev: ScanEve
         ev.stage("check", "done", issues=len(qc_issues))
 
         current = "features"
-        ev.stage("features", "running")
-        db = _features(work, kept, opts, ev)
-        ev.stage("features", "done")
+        if resume:
+            import pycolmap
 
-        current = "solve"
-        ev.stage("solve", "running")
-        recs = _solve(work, db, len(kept), ev)
+            ev.stage("features", "skipped", reason="kept from the last run")
+            current = "solve"
+            ev.stage("solve", "running")
+            recs = sorted((pycolmap.Reconstruction(d) for d in sorted((work / "sparse").iterdir())
+                           if (d / "images.bin").exists()), key=lambda r: -r.num_reg_images())
+        else:
+            ev.stage("features", "running")
+            db = _features(work, kept, opts, ev)
+            ev.stage("features", "done")
+            current = "solve"
+            ev.stage("solve", "running")
+            recs = _solve(work, db, len(kept), ev)
         reg = {im.name: k for k, r in enumerate(recs) for im in r.images.values()}
         ev.emit("registration", frames={n: reg.get(n) for n in times})
         ev.stage("solve", "done", pieces=len(recs), registered=len(reg))
@@ -464,6 +503,13 @@ def run_scan(video: Path, work: Path, opts: ScanOptions, store=None, ev: ScanEve
         if not home.rooms:
             raise RuntimeError("no room outline: too few points (plain walls?). See the footage checks")
         scene = sfm_scene.home_scene(home, opts.scene_id, opts.name)
+        if ref.get("scale_from") == "camera height":
+            ceiling, counter = room_outline.outline_ceiling(points), counter_layer(points)
+            cues = [f"ceiling {ceiling:.2f} m (usually 2.4-2.7)" if ceiling else None,
+                    f"counter tops {counter:.2f} m (usually 0.90-0.92)" if counter else None]
+            ev.issue("scale", "Sizes come from your phone's usual height, so they can be off by up to ~10%. Measured: "
+                     + ("; ".join(c for c in cues if c) or "nothing to cross-check")
+                     + ". For exact sizes, scan with printed markers or give one real measurement (--scale).", "warn")
 
         current = "builtins"
         ev.stage("builtins", "running")

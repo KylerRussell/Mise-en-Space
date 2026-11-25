@@ -179,7 +179,8 @@ def cmd_scan(args):
     # so the scan monitor (mise serve, /scan.html) can follow this run
     (work / "job.json").write_text(json.dumps({"id": f"cli_{work.name}"[:64], "scene_id": args.scene, "name": args.name,
                                                "created": time.time()}))
-    opts = ScanOptions(scene_id=args.scene, name=args.name, fps=args.fps, scale=args.scale, t0=args.t0, t1=args.t1)
+    opts = ScanOptions(scene_id=args.scene, name=args.name, fps=args.fps, scale=args.scale, t0=args.t0, t1=args.t1,
+                       resume=args.resume)
     res = run_scan(Path(args.video), work, opts, store=_store(args), ev=ScanEvents(work / "events.jsonl", show))
     print(json.dumps(res.to_dict(), indent=1, default=str))
 
@@ -213,6 +214,7 @@ def main(argv=None):
     a = sub.add_parser("scan"); a.add_argument("video"); a.add_argument("--scene", required=True); a.add_argument("--name", default="Scanned home")
     a.add_argument("--fps", type=float, default=3.0); a.add_argument("--scale", type=float, help="known scale (markers/LiDAR); default: from camera height")
     a.add_argument("--t0", type=float); a.add_argument("--t1", type=float); a.add_argument("--work", help="work folder (default: next to the scene store)")
+    a.add_argument("--resume", action="store_true", help="reuse the frames and camera solve from the last run in the work folder")
     a.set_defaults(fn=cmd_scan)
 
     args = p.parse_args(argv)

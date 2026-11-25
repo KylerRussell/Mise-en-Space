@@ -207,7 +207,17 @@ def _best_sample(rec, leveled, patch: Patch, normal, frames_dir, px_per_m: int, 
 
     images = sorted(rec.images.values(), key=lambda im: im.name)
     centers = leveled.apply(np.array([im.projection_center() for im in images]))
-    scored = sorted(range(len(images)), key=lambda k: -view_quality(patch, centers[k], normal))
+    w, h = patch.size_m
+    corners = np.array([patch.origin + a * w * patch.u + b * h * patch.v for a in (0, 1) for b in (0, 1)])
+
+    def in_view(im) -> bool:  # all four corners in front of the camera and inside the frame
+        cam = rec.cameras[im.camera_id]
+        uv, depth = colmap_projector(rec, im, leveled)(corners)
+        return bool((depth > 0.2).all() and (uv[:, 0] > 2).all() and (uv[:, 0] < cam.width - 2).all()
+                    and (uv[:, 1] > 2).all() and (uv[:, 1] < cam.height - 2).all())
+
+    seen = [k for k, im in enumerate(images) if in_view(im)]
+    scored = sorted(seen, key=lambda k: -view_quality(patch, centers[k], normal))
     out = []
     for k in scored[:12]:
         im = images[k]
@@ -231,7 +241,7 @@ def _best_sample(rec, leveled, patch: Patch, normal, frames_dir, px_per_m: int, 
 def auto_finishes(rec, leveled, scene, frames_dir, scene_dir, exposure: float = 1.5, px_per_m: int = 256) -> int:
     """Floor and wall finishes for every space, sampled from the capture. Returns spaces finished.
 
-    The floor patch is taken at the middle of the space, the wall patch on its longest wall
+    The floor patch is taken on open floor the camera walked over, the wall patch on its longest wall
     between knee and head height (above furniture, below upper cabinets). Writes textures to
     scene_dir/finishes/ and sets ``space.finish``.
     """
@@ -246,21 +256,26 @@ def auto_finishes(rec, leveled, scene, frames_dir, scene_dir, exposure: float = 
     for sp in scene.room.spaces:
         poly = np.array(sp.polygon, float)
         floor = walls = None
-        # floor: the free point farthest from the walls (a pole of inaccessibility, on a grid)
-        lo, hi = poly.min(0), poly.max(0)
-        gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], 25), np.linspace(lo[1], hi[1], 25))
-        pts = np.c_[gx.ravel(), gy.ravel()]
-        inside = np.array([g.point_in_polygon(p, poly) for p in pts])
+        # floor: where the camera walked is open floor. Of those spots, take the one farthest from the
+        # walls with nothing standing on it (no points between ankle and table height)
+        pts = leveled.cams[:, :2]
+        inside = np.array([g.point_in_polygon(p, poly) for p in pts]) if len(pts) else np.zeros(0, bool)
         if inside.any():
             pts = pts[inside]
             d = np.min([g.points_segment_distance(pts, poly[i], poly[(i + 1) % len(poly)]) for i in range(len(poly))], axis=0)
-            c = pts[d.argmax()]
-            size = float(min(0.8, 2 * d.max() * 0.9))
+            mid = leveled.points[(leveled.points[:, 2] > 0.04) & (leveled.points[:, 2] < 1.2), :2]
+            clutter = np.array([(np.abs(mid - p).max(1) < 0.45).sum() for p in pts]) if len(mid) else np.zeros(len(pts))
+            score = np.minimum(d, 0.6) - 0.02 * clutter
+            k = int(score.argmax())
+            c = pts[k]
+            size = float(min(0.8, 2 * d[k] * 0.9))
             if size >= 0.3:
                 tex = _best_sample(rec, leveled, floor_patch(c[0], c[1], size), (0, 0, 1), frames_dir, px_per_m)
                 if tex is not None:
                     color = gain(median_color(tex), exposure)
-                    detail = tileable(tint(flat_field(tex, px_per_m * size / 4), "#808080"))
+                    # keep the grain, not the noise: soften, then let the detail move the color only a little
+                    soft = cv2.GaussianBlur(tex, (0, 0), 1.2)
+                    detail = tileable(tint(flat_field(soft, px_per_m * size / 4), "#808080", contrast=0.5))
                     name = f"floor_{sp.id}.jpg"
                     cv2.imwrite(str(out_dir / name), tint(detail.astype(np.float32) / 128.0, color))
                     floor = Surface(color=color, texture=f"finishes/{name}", size_m=round(size, 3))

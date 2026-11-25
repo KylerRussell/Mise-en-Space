@@ -65,20 +65,19 @@ function openJob(id) {
   if (ws) ws.close();
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws/scans/${enc(id)}`);
-  const mine = cur;
-  ws.onmessage = (m) => { if (cur === mine) { apply(JSON.parse(m.data)); schedule(); } };
-  ws.onerror = () => poll(mine);  // no websocket (a proxy?): fall back to polling
+  ws.onmessage = (m) => { if (cur?.id === id) { apply(JSON.parse(m.data)); schedule(); } };
+  ws.onerror = () => poll(id);  // no websocket (a proxy?): fall back to polling
   loadJobs();
   schedule();
 }
 
-async function poll(job) {
-  while (cur === job && !["done", "failed", "cancelled"].includes(job.status)) {
-    const since = job.events.length ? job.events[job.events.length - 1].seq : -1;
+async function poll(id) {
+  while (cur?.id === id && !["done", "failed", "cancelled"].includes(cur.status)) {
+    const since = cur.events.length ? cur.events[cur.events.length - 1].seq : -1;
     try {
-      const j = await (await fetch(`/api/scans/${enc(job.id)}?since=${since}`)).json();
+      const j = await (await fetch(`/api/scans/${enc(id)}?since=${since}`)).json();
       for (const e of j.events) apply(e);
-      job.status = j.status;
+      cur.status = j.status;
       schedule();
     } catch {}
     await new Promise((r) => setTimeout(r, 1000));
@@ -86,7 +85,10 @@ async function poll(job) {
 }
 
 function apply(e) {
-  const j = cur;
+  let j = cur;
+  if (e.kind === "start" && j.events.length) {  // the scan was run again: start the picture over
+    cur = j = blankJob({ id: j.id, name: j.name, scene_id: j.scene_id, status: "running" });
+  }
   if (j.events.length && e.seq <= j.events[j.events.length - 1].seq) return;
   j.events.push(e);
   switch (e.kind) {
