@@ -101,7 +101,7 @@ median distance of wall points from the plan's walls at the best scale):
 | | VGGT (L4, 6 chunks) | 390 / 390 | x0.946 | 17.2 cm | one weak chunk join (5.8 deg) |
 | Whole tour | MapAnything, 5 chunks (G4) | 877 / 877 | - | - | 5.3 min in all, but the closet and bathroom chunks joined badly (16.6 deg, 35 cm): bent, fails the height check |
 | | MapAnything, 2 chunks joined in the bedroom (G4, 186 s on the GPU) | 877 / 877 | x1.062 (main room) | 16 cm (main), 26 cm (bedroom) | one piece, phone heights sane in every stretch (1.35-1.50 m), but the join is off by 3.3 deg and 30 cm: the bedroom sits wrong against the main room (east-west reads 5.29 m) |
-| | MapAnything, one pass | not yet | | | needs a GPU with 80 GB or more (G4, H100): the 40 GB A100 ran out of memory. Colab had none free for over an hour on 2026-11-25 |
+| | MapAnything, one pass (G4, 142 s, 76.5 GB peak) | 877 / 877 | - | - | bent: phone height reads 1.58 m in the main room, 1.39 m in the bedroom, and spreads 0.5-0.6 m in the closets and bathroom; fails the height check |
 
 - **MapAnything is the pick.** It solves every frame, including the turning-on-the-spot
   stretches COLMAP loses, and its metric scale lands within 1-6% of the plan with no reference.
@@ -124,10 +124,11 @@ median distance of wall points from the plan's walls at the best scale):
 
 ## Next steps
 
-1. Whole tour as one piece: `python scripts/colab/run_learned_recon.py tour1 --chunk 900 --gpu G4,H100`
-   (one pass, no joins) is still to try. Two chunks joined in the bedroom (`tour2`) give one
-   piece but a 30 cm join: rooms solved alone are more accurate than the joined tour. Better
-   joins: fit on the overlap's depth points (ICP) rather than camera centers, or align each
+1. Whole tour as one piece (`tour1`: `--chunk 900 --gpu G4,H100`; `tour2`: `--chunk 480 --overlap 80`).
+   Neither works yet: one pass over all 877 frames bends (the model is less consistent over
+   290 s than over one room), and two chunks joined in the bedroom (`tour2`) give one piece
+   but a 30 cm join. Rooms solved alone are the most accurate, so solve per room and join
+   better: fit on the overlap's depth points (ICP) rather than camera centers, or align each
    room's solve to the main room through the doorway frames. Score each room
    with `mise.eval.floorplan`, then build the home with `mise scan --poses`.
 2. `segment_home` on learned points: keep closets (nooks behind narrow openings) out of the
