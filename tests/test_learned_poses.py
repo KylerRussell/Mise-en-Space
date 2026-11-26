@@ -260,3 +260,39 @@ def test_windows_follow_the_rooms():
     long = plan_windows(t, np.zeros(len(t), int), max_frames=300)  # one room, 870 frames
     assert len(long) >= 3 and all(b - a <= 300 / 3 + 1 for a, b in long)
     assert all(long[i][1] > long[i + 1][0] for i in range(len(long) - 1))  # they overlap
+
+
+def test_the_solve_the_others_agree_with_is_kept():
+    from mise.pipeline.learned import consensus, variant_bounds
+
+    rng = np.random.default_rng(0)
+    t = np.linspace(0, 1, 60)
+    path = np.c_[3 * t, np.sin(4 * t), np.full_like(t, 1.4)]
+    names = [f"f{i:03d}" for i in range(60)]
+    good = [{n: 1.1 * p + rng.normal(0, 0.01, 3) + 5 for n, p in zip(names, path)} for _ in range(2)]
+    bent = path.copy()
+    bent[30:, 1] += 0.6 * (t[30:] - t[30])  # the second half folded off
+    solves = [good[0], {n: p for n, p in zip(names, bent)}, good[1]]
+    best, med = consensus(solves)
+    assert best != 1 and med[1] == max(med)
+    vb = variant_bounds(10.0, 50.0, 3, 60.0)
+    assert vb[0] == (10.0, 50.0) and all(a <= 10 and b >= 50 for a, b in vb) and len(set(vb)) == 3
+
+
+def test_scale_from_doorways_and_the_model():
+    from types import SimpleNamespace
+    from mise.pipeline.refscale import combine, door_estimate
+
+    rng = np.random.default_rng(1)
+    k = 1.05  # the solve is 5% small: real 2.06 m openings read 2.06 / 1.05
+    doors, pts = [], []
+    for cx in (1.0, 3.0, 5.0):
+        top = 2.06 / k
+        wall_above = np.c_[rng.uniform(cx - 0.4, cx + 0.4, 600), rng.normal(0, 0.02, 600), rng.uniform(top, 2.5, 600)]
+        floor = np.c_[rng.uniform(cx - 0.4, cx + 0.4, 200), rng.normal(0, 0.05, 200), rng.normal(0, 0.01, 200)]
+        pts += [wall_above, floor]
+        doors.append(SimpleNamespace(center=(cx, 0.0), axis="x", width=0.85))
+    d = door_estimate(np.vstack(pts), doors)
+    assert d["doors"] == 3 and abs(d["factor"] / k - 1) < 0.015
+    c = combine({"model": {"factor": 1.0, "sigma": 0.04}, "doors": d, "box": None})
+    assert 1.0 < c["factor"] < d["factor"] and c["sigma_pct"] < 4

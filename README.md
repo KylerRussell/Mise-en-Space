@@ -131,9 +131,13 @@ whole home, room by room:
 mise learned-scan walkthrough.mp4 --scene my-flat   # Depth Anything 3 on Colab, then the scan
 ```
 
-It picks frames, takes one rough pass over the whole walk, solves one window per room stay on
-concurrent Colab sessions, chains the windows through the frames they share and builds the
-scene. Steps already done in its work folder are reused. The parts, by hand:
+It picks frames, takes one rough pass over the whole walk, solves each room window three times
+over slightly different stretches on concurrent Colab sessions (keeping the solve the other two
+agree with: now and then a run folds a room), chains the windows through the frames they share
+and builds the scene. The scale is the model's metres checked against every doorway (a standard
+door's opening is about 2.06 m tall) and, with `--box clicks.json`, an object of known size;
+the estimates and their error bars land in `learned-run/scale.json`. Steps already done in its
+work folder are reused. The parts, by hand:
 
 ```bash
 python scripts/colab/run_learned_recon.py bedroom --t0 134 --t1 182 --model da3_nested   # one stretch

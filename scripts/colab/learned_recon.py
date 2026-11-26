@@ -49,6 +49,7 @@ CHECKPOINTS = {
                "https://download.europe.naverlabs.com/ComputerVision/MUSt3R/MUSt3R_512_retrieval_codebook.pkl"],
     "vggt_omega": ["hf://facebook/VGGT-Omega/vggt_omega_1b_512.pt"],
 }
+TAKES_K = {"da3", "da3_nested", "pi3x"}  # wrappers that accept the camera's intrinsics (task calibrated_sfm)
 EXTRA_PIP = {"da3": ["addict", "scikit-learn"], "da3_nested": ["addict", "scikit-learn"]}  # used, not declared
 MODELS = ["mapanything", "vggt", *EXTERNAL]
 
@@ -98,10 +99,17 @@ def install(model: str) -> None:
     importlib.invalidate_caches()
 
 
-def load_model(model: str, model_id: str | None):
+def load_model(model: str, model_id: str | None, with_k: bool = False):
     import torch
 
     if model in EXTERNAL:
+        if with_k and model in TAKES_K:  # the same model, told to use the given intrinsics
+            from mapanything.models import _init_hydra_config, init_model
+
+            cfg = _init_hydra_config("configs/train.yaml", overrides=[f"model={model}", "machine=colab",
+                                                                      "model/task=calibrated_sfm"])
+            m = init_model(model_str=cfg.model.model_str, model_config=cfg.model.model_config, torch_hub_force_reload=False)
+            return m.to("cuda").eval(), f"map-anything wrapper: {model}, given intrinsics"
         from mapanything.models import init_model_from_config
 
         return init_model_from_config(model, device="cuda", machine="colab").eval(), f"map-anything wrapper: {model}"
@@ -163,6 +171,8 @@ def run_external(model, paths: list[Path], K: np.ndarray | None = None, name: st
                         patch_size=patch)
     for i, v in enumerate(views):
         v["label"], v["instance"] = ["mise"], [f"{i:05d}"]  # MUSt3R names views by these
+        if K is not None and name in TAKES_K:
+            v["camera_intrinsics"] = torch.from_numpy(K.astype(np.float32))[None]
         for k, val in list(v.items()):
             if torch.is_tensor(val):
                 v[k] = val.to("cuda")
@@ -384,12 +394,12 @@ def main(argv=None) -> None:
         sx, sy = MODEL_W / fw, MODEL_H / fh
         K = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1.0]])
         print(f"[recon] known intrinsics: fx {fx:.1f} fy {fy:.1f} cx {cx:.1f} cy {cy:.1f} (frame pixels)", flush=True)
-    model, model_id = load_model(a.model, a.model_id)
+    model, model_id = load_model(a.model, a.model_id, with_k=K is not None)
     gpu = torch.cuda.get_device_name(0)
     if a.model in EXTERNAL:
         def runner(m, ps, k):
             return run_external(m, ps, k, a.model)
-        if K is not None:
+        if K is not None and a.model not in TAKES_K:
             print(f"[recon] {a.model} runs on images only here: the intrinsics are not used", flush=True)
     else:
         runner = run_mapanything if a.model == "mapanything" else run_vggt

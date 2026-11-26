@@ -164,13 +164,35 @@ its scale from the bin is +-9%; COLMAP's bin scale carried over through the came
 bigger than the plan. The model's own metric scale was the better scale on this tour. To make
 the bin precise, the coached walk should circle it for a few seconds.
 
+## Repeatable solves and scale without the plan (done 2026-11-26)
+
+Two runs of Depth Anything 3 over nearly the same stretch don't give the same geometry (scale
+wanders ~4%, now and then a room folds). So `learned-scan` solves each window three times over
+stretches grown a few seconds at one end or the other (`learned.variant_bounds`) and keeps the
+medoid: the solve whose cameras the others agree with best after a similarity fit
+(`learned.consensus`; `learned-run/learned/consensus.json`). Giving the model the calibrated
+intrinsics (now done for da3/da3_nested/pi3x) changed nothing: its focal lengths were already
+within 1-5%.
+
+Scale (`pipeline/refscale.py`, `learned-run/scale.json`): inverse-variance mean of the model's
+metres (+-4%), the doorway heads (2.06 m openings, +-2% from the median of 3-5 doors) and the
+box (+-5-9%). On four joined homes it landed within -1.1..+0.7% of the plan (the model alone:
+-1.3..+3.2%). Ceiling height is no use (2.37-2.76 m across solves of the same rooms).
+
+The automatic run with both (data/scans/home-v3): joins 2.9 and 2.5 cm, scale x1.034 (the plan
+asks x1.032), walls 5.6 cm off the plan. IoU: main 0.93, bathroom 0.90, bedroom 0.89, walk-in
+0.65, bedroom closet 0.35, entry closet missed. The main room's 4.88 m span still reads -6%
+(+5.5% in another run): that corner of the main room is the least stable part of the solve.
+
+The straightening pass (`room_outline.regularize_walls`: shared walls one thickness apart,
+wall lines shared) moves IoUs by <=0.02; squaring rooms onto one grid (`--square`) gains nothing.
+
 ## Next steps
 
-1. Stage 1 loose ends: the walk-in <-> bathroom doorway isn't found and doorway widths read
-   narrow (0.5 m for ~0.85 m: the open door leaf and jambs count as wall); the entry closet is
-   missed; the main room's 4.88 m span reads 5-10% off; automatic windows are a little worse
-   than hand-picked ones (the rough pass can't sort the small rooms: let them be one window).
-2. Scale from the bin to 1%: more views of it (coaching), or fit the rim in several solves.
+1. Stage 1 loose ends: closets (walk-in 0.65, bedroom closet 0.35, entry closet missed); the
+   main room's 4.88 m span (+-6%); a phantom space behind the bathroom mirror; doorway widths
+   0.7 m for ~0.8 m.
+2. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
 3. Stage 2: splats and the empty room on a Colab GPU, from the joined solve.
 4. Rebuild the bedroom, closets and bathroom of `my-apartment` from the learned home.
 

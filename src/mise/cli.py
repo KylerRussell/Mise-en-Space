@@ -203,8 +203,18 @@ def cmd_learned_scan(args):
     from .pipeline.learned_flow import solve_home
 
     work = Path(args.work or Path(args.data).parent / "scans" / args.scene)
+    say = lambda m: print(f"[learned] {m}", flush=True)  # noqa: E731
     home = solve_home(Path(args.video), work / "learned-run", tag=args.scene, model=args.model, gpu=args.gpu, fps=args.fps,
-                      say=lambda m: print(f"[learned] {m}", flush=True))
+                      variants=args.variants, say=say)
+    if args.scale is None:  # the model's metres, checked against the doorways and the box
+        from .pipeline.refscale import reference_scale
+
+        box = json.loads(Path(args.box).read_text()) if args.box else None
+        rep = reference_scale(home, box)
+        (work / "learned-run" / "scale.json").write_text(json.dumps(rep, indent=1, default=float))
+        say(f"scale x{rep['factor']} +-{rep['sigma_pct']}% from " + ", ".join(
+            f"{k} x{v['factor']} +-{v['sigma_pct']}%" for k, v in rep["from"].items()))
+        args.scale = rep["factor"]
     args.poses, args.frames, args.work = str(home), str(work / "learned-run" / "picked"), str(work)
     args.resume, args.t0, args.t1 = False, None, None
     cmd_scan(args)
@@ -264,10 +274,12 @@ def main(argv=None):
 
     a = sub.add_parser("learned-scan", help="video -> scene, cameras solved by a learned model on Colab, room by room")
     a.add_argument("video"); a.add_argument("--scene", required=True); a.add_argument("--name", default="Scanned home")
-    a.add_argument("--fps", type=float, default=3.0); a.add_argument("--scale", type=float, help="known scale; default: the model's (metric)")
+    a.add_argument("--fps", type=float, default=3.0); a.add_argument("--scale", type=float, help="known scale; default: the model's, checked against doorways and --box")
     a.add_argument("--work", help="work folder (default: next to the scene store)")
     a.add_argument("--model", default="da3_nested", help="learned_recon.py model (default: Depth Anything 3, metric)")
     a.add_argument("--gpu", default="G4,H100", help="Colab GPUs to try, in order")
+    a.add_argument("--variants", type=int, default=3, help="solves per window; the one the others agree with is kept")
+    a.add_argument("--box", help="clicked rim corners of an object of known size (JSON: known_m, known_side, clicks)")
     a.set_defaults(fn=cmd_learned_scan)
 
     a = sub.add_parser("join-poses", help="join learned solves of overlapping stretches of one video")

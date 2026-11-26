@@ -227,30 +227,16 @@ def load_solve(path: Path):
 
 
 def box_check(rec, L, box: dict) -> dict:
-    """Scale from a reference object of known size: a level rectangle fitted to its clicked rim
-    corners (see pipeline.scale.fit_level_rectangle) through this solve's cameras. `factor`
+    """Scale from a reference object of known size (pipeline.refscale.box_estimate). `factor`
     multiplies the solve's (leveled) lengths into meters; rim_rms_px says how well the
     solve's poses agree with each other around the object."""
-    from ..pipeline import scale as sc
+    from ..pipeline.refscale import box_estimate
 
-    by_name = {im.name: im for im in rec.images.values()}
-    cams, clicks = {}, {}
-    for n, cs in box["clicks"].items():
-        im = by_name.get(n)
-        if im is None:
-            continue
-        cam = rec.cameras[im.camera_id]
-        K = cam.calibration_matrix()
-        cw = im.cam_from_world()
-        cams[n] = sc.Camera(K=K, R=cw.rotation.matrix(), t=np.asarray(cw.translation))
-        clicks[n] = {k: tuple((K @ np.r_[cam.cam_from_img(np.array([uv], float))[0], 1.0])[:2]) for k, uv in cs.items()}
-    if sum(len(v) for v in clicks.values()) < 6:
-        return {"error": f"the object is clicked in only {len(clicks)} solved frames"}
-    r = sc.fit_level_rectangle(cams, clicks, L.R, L.t / L.scale)  # model units, leveled
-    short = box.get("known_side", "short").startswith("short")
-    side = r.short_side if short else r.long_side
-    return {"frames": len(clicks), "rim_rms_px": round(r.rms_px, 1), "factor": round(box["known_m"] / (side * L.scale), 4),
-            "sigma_pct": round(100 * r.short_side_rel_sigma, 1)}
+    r = box_estimate(rec, L, box)
+    if r is None:
+        return {"error": "the object is clicked in too few solved frames"}
+    return {"frames": r["frames"], "rim_rms_px": r["rim_rms_px"], "factor": round(r["factor"], 4),
+            "sigma_pct": round(100 * r["sigma"], 1)}
 
 
 def score(path: Path, plan: dict, room: str, scene: Path | None = None, box: dict | None = None) -> dict:

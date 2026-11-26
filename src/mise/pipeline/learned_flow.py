@@ -5,8 +5,11 @@
                rooms bent (Depth Anything 3 takes ~900 frames in one pass on a 96 GB GPU)
     windows -> the room each frame was taken in, from the rough pass; one window per room
                stay, the stretches the rough pass can't sort out together (plan_windows)
-    rooms   -> one pass per window, all at once (concurrent Colab sessions)
+    rooms   -> one pass per window, all at once (concurrent Colab sessions); with variants > 1,
+               each window is solved again over slightly grown stretches and the solve the others
+               agree with most is kept (consensus): now and then a run folds a room
     chain   -> the window solves joined through the frames they share (join_solves)
+    scale   -> the model's metres, checked against the doorways and a known box (refscale)
 
 The result is a learned_recon.py-style folder for `mise scan --poses`. Runs go through
 scripts/colab/run_learned_recon.py (Colab CLI, sessions named mise-<tag>-...), so this needs a
@@ -23,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .learned import join, plan_windows
+from .learned import camera_centers, consensus, join, plan_windows, variant_bounds
 
 LAUNCHER = Path(__file__).resolve().parents[3] / "scripts" / "colab" / "run_learned_recon.py"
 
@@ -86,7 +89,7 @@ def frame_rooms(solve: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def solve_home(video: Path, work: Path, tag: str, model: str = "da3_nested", gpu: str = "G4,H100",
-               fps: float = 3.0, say=print) -> Path:
+               fps: float = 3.0, variants: int = 3, say=print) -> Path:
     """Video -> work/learned/home (a joined solve for `mise scan --poses`). Steps already done
     (their outputs in `work`) are reused, so a failed run can be started again."""
     work = Path(work)
@@ -102,19 +105,34 @@ def solve_home(video: Path, work: Path, tag: str, model: str = "da3_nested", gpu
     windows = plan_windows(times, rooms)
     say("windows: " + ", ".join(f"{a:.0f}-{b:.0f} s" for a, b in windows))
     (learned / "windows.json").write_text(json.dumps(windows))
-    jobs, outs = {}, []
+    t_end = float(times.max())
+    jobs, runs = {}, []
     for i, (a, b) in enumerate(windows):
-        out = learned / f"w{i}"
-        outs.append(out)
-        if (out / "meta.json").exists():
-            continue
-        n = int(np.sum((times >= a) & (times <= b)))
-        g = gpu if n > 400 else gpu + ",A100"  # 40 GB holds about 400 frames of Depth Anything 3
-        jobs[f"w{i}"] = (colab_job(f"{tag}-w{i}", frames_dir, out, learned / f"w{i}.log", model, g, a, b, chunk=900),
-                         out, learned / f"w{i}.log")
+        runs.append([])
+        for v, (va, vb) in enumerate(variant_bounds(a, b, max(1, variants), t_end)):
+            key = f"w{i}" if v == 0 else f"w{i}v{v}"
+            out = learned / key
+            runs[-1].append(out)
+            if (out / "meta.json").exists():
+                continue
+            n = int(np.sum((times >= va) & (times <= vb)))
+            g = gpu if n > 400 else gpu + ",A100"  # 40 GB holds about 400 frames of Depth Anything 3
+            jobs[key] = (colab_job(f"{tag}-{key}", frames_dir, out, learned / f"{key}.log", model, g, va, vb, chunk=900),
+                         out, learned / f"{key}.log")
     if jobs:
-        say(f"solving {len(jobs)} windows at once")
+        say(f"solving {len(jobs)} runs at once ({len(windows)} windows x {max(1, variants)})")
         _finish(jobs, say)
+    outs, picks = [], []
+    for i, rs in enumerate(runs):
+        if len(rs) > 1:
+            best, med = consensus([camera_centers(r) for r in rs])
+            say(f"w{i}: kept {rs[best].name} (runs disagree by " + ", ".join(f"{100 * m:.1f}" for m in med) + " cm)")
+        else:
+            best, med = 0, [0.0]
+        outs.append(rs[best])
+        picks.append({"window": windows[i], "runs": [r.name for r in rs], "kept": rs[best].name,
+                      "disagreement_cm": [round(100 * m, 1) for m in med]})
+    (learned / "consensus.json").write_text(json.dumps(picks, indent=1))
     home = learned / "home"
     meta = join(outs, home) if len(outs) > 1 else None
     if meta is None:  # one window: it is the home

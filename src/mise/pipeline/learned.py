@@ -402,3 +402,48 @@ def plan_windows(times: np.ndarray, rooms: np.ndarray, smooth_s: float = 8.0, mi
         for p in range(parts):
             windows.append((float(max(t0, edges[p] - overlap_s)), float(min(t1, edges[p + 1] + overlap_s))))
     return windows
+
+
+def _similarity_rms(A: np.ndarray, B: np.ndarray) -> float:
+    """rms of B against A after the best similarity (scale, rotation, offset) from A onto B."""
+    s, R, t = umeyama(A, B)
+    return float(np.sqrt((((s * A @ R.T + t) - B) ** 2).sum(1).mean()))
+
+
+def consensus(solves: list[dict[str, np.ndarray]], min_shared: int = 20) -> tuple[int, list[float]]:
+    """Of several solves of (nearly) one stretch, the one the others agree with most.
+
+    The same model run over slightly different stretches does not give the same geometry: now
+    and then a run bends or folds a room. Each solve (frame name -> camera center) is compared
+    with every other over the frames they share, after the similarity that fits one onto the
+    other; the medoid (least median disagreement) is kept. Returns its index and each solve's
+    median disagreement (m, in the units of the solves' own scale)."""
+    n = len(solves)
+    D = np.full((n, n), np.nan)
+    for i in range(n):
+        for j in range(i + 1, n):
+            k = sorted(set(solves[i]) & set(solves[j]))
+            if len(k) < min_shared:
+                continue
+            A = np.array([solves[i][x] for x in k])
+            B = np.array([solves[j][x] for x in k])
+            D[i, j] = D[j, i] = _similarity_rms(A, B)
+    med = [float(np.nanmedian(r)) if np.isfinite(r).any() else float("inf") for r in D]
+    return int(np.argmin(med)), med
+
+
+def camera_centers(path: Path) -> dict[str, np.ndarray]:
+    import pycolmap
+
+    rec = pycolmap.Reconstruction(str(Path(path) / "sparse" / "0"))
+    return {im.name: np.asarray(im.projection_center()) for im in rec.images.values()}
+
+
+def variant_bounds(a: float, b: float, n: int, t_end: float, step: float = 6.0) -> list[tuple[float, float]]:
+    """n stretches around [a, b] for repeated solves: the window itself, then grown a few seconds
+    at one end or the other (only grown, so a variant still overlaps its neighbors)."""
+    out = [(a, b)]
+    for k in range(1, n):
+        g = step * ((k + 1) // 2)
+        out.append((max(0.0, a - g), min(t_end, b + g / 3)) if k % 2 else (max(0.0, a - g / 3), min(t_end, b + g)))
+    return out
