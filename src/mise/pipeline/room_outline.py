@@ -558,3 +558,96 @@ def _inside(poly: np.ndarray, p) -> bool:
         if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
             inside = not inside
     return inside
+
+
+def _axis_edges(rooms: list[Outline], kinds: tuple[str, ...]) -> list[dict]:
+    """Every axis-aligned edge of the rooms: which room/edge, the axis it is fixed on (0: x = pos),
+    its position, its extent along the other axis, and which way is out of its room (+1/-1)."""
+    out = []
+    for ri, r in enumerate(rooms):
+        if r.kind not in kinds:
+            continue
+        p = np.array(r.polygon, float)
+        ccw = 0.5 * float(np.dot(p[:, 0], np.roll(p[:, 1], -1)) - np.dot(p[:, 1], np.roll(p[:, 0], -1))) > 0
+        for i in range(len(p)):
+            a, b = p[i], p[(i + 1) % len(p)]
+            axis = 0 if abs(a[0] - b[0]) < 1e-6 else 1 if abs(a[1] - b[1]) < 1e-6 else None
+            if axis is None:
+                continue
+            e = b - a
+            out_n = np.array([e[1], -e[0]]) if ccw else np.array([-e[1], e[0]])  # right of travel is out for ccw
+            lo, hi = sorted([a[1 - axis], b[1 - axis]])
+            out.append({"room": ri, "edge": i, "axis": axis, "pos": float(a[axis]), "lo": float(lo), "hi": float(hi),
+                        "sign": 1 if out_n[axis] > 0 else -1, "len": float(hi - lo)})
+    return out
+
+
+def _move_edge(r: Outline, i: int, axis: int, pos: float) -> None:
+    p = np.array(r.polygon, float)
+    p[i][axis] = pos
+    p[(i + 1) % len(p)][axis] = pos
+    r.polygon = [(round(float(x), 3), round(float(y), 3)) for x, y in p]
+    r.area_m2 = abs(0.5 * float(np.dot(p[:, 0], np.roll(p[:, 1], -1)) - np.dot(p[:, 1], np.roll(p[:, 0], -1))))
+
+
+def regularize_walls(rooms: list[Outline], thickness: float | None = None, gap: tuple[float, float] = (-0.15, 0.45),
+                     line_tol: float = 0.10, min_overlap: float = 0.3) -> dict:
+    """Rooms as one floor plan, not separate outlines (in place).
+
+    Each room's walls were placed from its own points, and rooms solved in separate passes can be
+    off from each other by a few cm to a few tens: a shared wall comes out as two faces that
+    overlap, or stand too far apart. Here:
+      - shared walls: two rooms' facing edges (overlapping along at least `min_overlap`, between
+        `gap` apart: negative is overlap) become the two faces of one wall, `thickness` apart
+        (default: the median of the gaps found, within 8-25 cm), about their middle;
+      - wall lines: other edges facing the same way within `line_tol` of each other take one
+        line (their length-weighted mean), as walls along one side of a home usually do.
+    Closets are left to settle_closets. Returns what was done.
+    """
+    edges = _axis_edges(rooms, ("room",))
+    pairs = []
+    for i, a in enumerate(edges):
+        for b in edges[i + 1:]:
+            if a["room"] == b["room"] or a["axis"] != b["axis"] or a["sign"] == b["sign"]:
+                continue
+            if min(a["hi"], b["hi"]) - max(a["lo"], b["lo"]) < min_overlap:
+                continue
+            lo_e, hi_e = (a, b) if a["sign"] > 0 else (b, a)  # lo_e faces +, hi_e faces -: hi_e beyond lo_e
+            g = hi_e["pos"] - lo_e["pos"]
+            if gap[0] <= g <= gap[1]:
+                pairs.append((lo_e, hi_e, g))
+    # each edge in at most one shared wall: the closest pair first
+    pairs.sort(key=lambda t: abs(t[2]))
+    used, walls = set(), []
+    for lo_e, hi_e, g in pairs:
+        ka, kb = (lo_e["room"], lo_e["edge"]), (hi_e["room"], hi_e["edge"])
+        if ka in used or kb in used:
+            continue
+        used |= {ka, kb}
+        walls.append((lo_e, hi_e, g))
+    t = thickness if thickness is not None else (
+        float(np.clip(np.median([g for *_, g in walls if g > 0] or [0.12]), 0.08, 0.25)))
+    for lo_e, hi_e, g in walls:
+        mid = 0.5 * (lo_e["pos"] + hi_e["pos"])
+        _move_edge(rooms[lo_e["room"]], lo_e["edge"], lo_e["axis"], mid - t / 2)
+        _move_edge(rooms[hi_e["room"]], hi_e["edge"], hi_e["axis"], mid + t / 2)
+        lo_e["pos"], hi_e["pos"] = mid - t / 2, mid + t / 2
+    # wall lines: the rest, grouped by axis and facing, chained within line_tol
+    lines = 0
+    rest = [e for e in edges if (e["room"], e["edge"]) not in used and e["len"] >= 0.4]
+    for axis in (0, 1):
+        for sign in (1, -1):
+            grp = sorted([e for e in rest if e["axis"] == axis and e["sign"] == sign], key=lambda e: e["pos"])
+            k = 0
+            while k < len(grp):
+                j = k + 1
+                while j < len(grp) and grp[j]["pos"] - grp[k]["pos"] <= line_tol:
+                    j += 1
+                run = grp[k:j]
+                if len({e["room"] for e in run}) > 1:
+                    at = float(np.average([e["pos"] for e in run], weights=[e["len"] for e in run]))
+                    for e in run:
+                        _move_edge(rooms[e["room"]], e["edge"], axis, at)
+                    lines += 1
+                k = j
+    return {"shared_walls": len(walls), "thickness_m": round(t, 3), "wall_lines": lines}

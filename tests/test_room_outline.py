@@ -201,3 +201,21 @@ def test_a_doorway_walked_through_but_hardly_seen():
     walk = np.vstack([a + (b - a) * f for a, b in zip(knots[:-1], knots[1:]) for f in np.linspace(0, 1, 6)[:-1]])
     found = in_wall(room_outline.segment_home(cams, sights, walk=walk))
     assert len(found) == 1 and abs(found[0].center[1] - 1.4) < 0.3
+
+
+def test_rooms_settle_into_one_plan():
+    """Two rooms solved apart: their shared wall's faces overlap by 6 cm in one place; their
+    north walls are 7 cm apart. One wall, 12 cm thick; one north line."""
+    from mise.pipeline.room_outline import Outline, regularize_walls
+
+    def box(x0, y0, x1, y1):
+        return Outline(polygon=[(x0, y0), (x1, y0), (x1, y1), (x0, y1)], area_m2=(x1 - x0) * (y1 - y0), ceiling_m=None,
+                       free=np.zeros((1, 1)), origin=(0, 0), cell=0.05)
+
+    left, right = box(0, 0, 3.03, 3.0), box(2.97, 0.02, 6, 3.07)
+    rep = regularize_walls([left, right], thickness=0.12)
+    assert rep["shared_walls"] == 1 and rep["wall_lines"] >= 1
+    lx = max(x for x, _ in left.polygon)
+    rx = min(x for x, _ in right.polygon)
+    assert abs((rx - lx) - 0.12) < 1e-6 and abs((rx + lx) / 2 - 3.0) < 1e-6
+    assert abs(max(y for _, y in left.polygon) - max(y for _, y in right.polygon)) < 1e-6
