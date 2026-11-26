@@ -27,6 +27,12 @@ experiment.
   `truth.json`). Local only, like the video: the repo is public. Report errors as % or cm.
 - On the owner's machine the video is `~/Downloads/Room_Tour.mp4` and the tour's picked frames
   (3 fps, 1280 px, 877 frames) are in `data/scans/tour-frames/`. The project venv is `.venv`.
+- **The product is one coached walkthrough.** One video (or one live walk in the web app, which
+  says where to linger because the reconstruction is unsure there). **Never markers** on walls.
+- **Scale reference: the blue bin.** Its horizontal short side (the face with the logo) is
+  exactly 1 ft. The plan is only the accuracy check. Rim clicks: `data/floorplan/box_clicks.json`
+  (local), scored with `mise.eval.floorplan --box`.
+- Any mix of tools is fine; benchmark models against the plan rather than settling on one.
 
 ## What exists (all tested)
 
@@ -122,24 +128,51 @@ median distance of wall points from the plan's walls at the best scale):
   200 frames on a G4 (48 GB peak) or ~45 s per 144 frames on an L4 (18 GB).
 - Listing plans can be off by a few % themselves: treat differences under ~3% as noise.
 
+## Whole home from one video (done 2026-11-26)
+
+`mise learned-scan VIDEO --scene ID` runs the lot: frames, a rough Depth Anything 3 pass over
+the whole walk, one window per room stay (`learned.plan_windows` on rooms traced in the rough
+pass), all windows at once on Colab, chained (`join-poses`), then the scan.
+
+Models on the first tour (`scripts/colab/learned_recon.py --model ...`, MapAnything's wrappers),
+walls off the plan at best scale:
+
+| model | bedroom alone | main room alone | whole walk in one pass |
+|---|---|---|---|
+| da3_nested (Depth Anything 3, metric) | 4.0 cm | 10.1 cm | rooms placed right, small rooms bent |
+| pi3 | 3.7 cm | 16 cm | bedroom 24% long |
+| pi3x (metric-ish) | 4.8 cm | | |
+| must3r | 5.2 cm | | |
+| mapanything (+ calibrated K) | 20-22 cm | 11-15 cm | bends |
+
+VGGT-Omega's weights are gated (HF access request needed). pi3x and MUSt3R weights are
+non-commercial.
+
+Depth Anything 3 rooms chained through ~10 s overlaps (joins 2.5-6 cm): every frame placed,
+walls 8.4 cm off the plan, metric scale within 1.3% of the plan. Traced rooms (IoU with the plan):
+bedroom 0.97, main 0.91, bathroom 0.82, walk-in 0.76, bedroom closet 0.60, entry closet missed.
+Spans within ~1-4% except the main room's 4.88 m (+5.5%). The fully automatic run: main 0.91,
+bedroom 0.84, walk-in 0.83, bathroom 0.68. A single window across closets + bathroom
+(182-293 s) works as well as two (bathroom 0.89).
+
+What didn't work: joining room windows onto the rough pass (`--onto`: it is bent in the small
+rooms and drags them), fixed 70 s windows (a window straddling main room and bedroom turned
+8 deg; the chain bent), MapAnything room windows (14 cm joins).
+
+The bin: Depth Anything 3's poses jitter around it (rim reprojection 55 px; COLMAP 5.6 px), so
+its scale from the bin is +-9%; COLMAP's bin scale carried over through the cameras says 8-12%
+bigger than the plan. The model's own metric scale was the better scale on this tour. To make
+the bin precise, the coached walk should circle it for a few seconds.
+
 ## Next steps
 
-1. Whole tour as one piece (`tour1`: `--chunk 900 --gpu G4,H100`; `tour2`: `--chunk 480 --overlap 80`).
-   Neither works yet: one pass over all 877 frames bends (the model is less consistent over
-   290 s than over one room), and two chunks joined in the bedroom (`tour2`) give one piece
-   but a 30 cm join. Rooms solved alone are the most accurate, so solve per room and join
-   better: fit on the overlap's depth points (ICP) rather than camera centers, or align each
-   room's solve to the main room through the doorway frames. Score each room
-   with `mise.eval.floorplan`, then build the home with `mise scan --poses`.
-2. `segment_home` on learned points: keep closets (nooks behind narrow openings) out of the
-   room, and re-tune `push_furniture_edges` and `counter_layer` for dense, noisier points.
-   Score the rooms it outputs against `truth.json`, not just the solve.
-3. Tighter walls: keep only higher-confidence pixels (`--points-per-frame`, the percentile in
-   `ColmapWriter.add`), or MapAnything's multi-view confidence (`use_multiview_confidence`).
-4. Scale: MapAnything reads 2-6% small across the floor while its heights are about right.
-   Cross-check with the blue bin (0.305 m) in the main room before trusting it to 1%.
-5. Rebuild the bedroom, closets and bathroom of `my-apartment` from the learned solve and the
-   plan instead of the description.
+1. Stage 1 loose ends: the walk-in <-> bathroom doorway isn't found and doorway widths read
+   narrow (0.5 m for ~0.85 m: the open door leaf and jambs count as wall); the entry closet is
+   missed; the main room's 4.88 m span reads 5-10% off; automatic windows are a little worse
+   than hand-picked ones (the rough pass can't sort the small rooms: let them be one window).
+2. Scale from the bin to 1%: more views of it (coaching), or fit the rim in several solves.
+3. Stage 2: splats and the empty room on a Colab GPU, from the joined solve.
+4. Rebuild the bedroom, closets and bathroom of `my-apartment` from the learned home.
 
 ## Smaller open items
 

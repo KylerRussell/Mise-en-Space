@@ -124,18 +124,31 @@ at once when the footage won't map (the camera needs https on a phone). Scans st
 computer, under `scans/` next to the scene store (`MISE_SCANS` to move it).
 
 **Camera solve from a learned model (Colab GPU).** Where COLMAP collapses (turning on the
-spot, plain walls), a feed-forward model can solve the cameras instead:
+spot, plain walls), a feed-forward model can solve the cameras instead. One command does the
+whole home, room by room:
 
 ```bash
-python scripts/colab/run_learned_recon.py bedroom --t0 134 --t1 182   # MapAnything on a Colab GPU
-mise scan walkthrough.mp4 --scene my-flat --poses data/scans/learned/bedroom --frames data/scans/tour-frames
+mise learned-scan walkthrough.mp4 --scene my-flat   # Depth Anything 3 on Colab, then the scan
+```
+
+It picks frames, takes one rough pass over the whole walk, solves one window per room stay on
+concurrent Colab sessions, chains the windows through the frames they share and builds the
+scene. Steps already done in its work folder are reused. The parts, by hand:
+
+```bash
+python scripts/colab/run_learned_recon.py bedroom --t0 134 --t1 182 --model da3_nested   # one stretch
+mise join-poses data/scans/learned/home data/scans/learned/main data/scans/learned/bedroom
+mise scan walkthrough.mp4 --scene my-flat --poses data/scans/learned/home --frames data/scans/tour-frames
 ```
 
 The first command uploads the stretch's frames (already picked by mise into `--frames`) to a
 Colab VM through the `colab` CLI, runs `scripts/colab/learned_recon.py` there, downloads a
 COLMAP model with points from each frame's depth, and stops the VM. `--poses` imports it and
-carries on as `--resume`, with `--scale 1.0` when the model's scale is metric (MapAnything).
-`--model vggt` and `--gpu H100` choose others; runs with different names can go at once.
+carries on as `--resume`, with `--scale 1.0` when the model's scale is metric (Depth Anything 3,
+MapAnything). `--model` takes `mapanything`, `vggt`, `pi3`, `pi3x`, `da3`, `da3_nested`, `must3r`
+(MapAnything's wrappers); `--gpu H100` chooses the GPU; runs with different names can go at once.
+`python -m mise.eval.floorplan PLAN --room R LABEL=SOLVE [--box CLICKS]` scores a solve against a
+floor plan (and a reference object of known size).
 
 ## Scan to scene with splats (once you have a capture)
 
