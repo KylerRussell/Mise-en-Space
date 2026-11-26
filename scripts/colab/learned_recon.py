@@ -30,18 +30,60 @@ from pathlib import Path
 
 import numpy as np
 
-MODEL_W, MODEL_H = 518, 294  # both models take 518 wide, height a multiple of 14; 16:9 frames -> 294
+MODEL_W, MODEL_H = 518, 294  # model input size; 16:9 frames at 518 wide -> 294 (a multiple of 14); set per model
+
+# Other models, run through MapAnything's own wrappers (one interface, same outputs as MapAnything):
+# name -> (pip extra of map-anything, input width, height, image normalization, patch size, metric)
+EXTERNAL = {
+    "pi3": ("", 518, 294, "identity", 14, False),
+    "pi3x": ("pi3", 518, 294, "identity", 14, True),  # "approximate metric scale"
+    "da3": ("depth-anything-3", 504, 280, "dinov2", 14, False),
+    "da3_nested": ("depth-anything-3", 504, 280, "dinov2", 14, True),
+    "must3r": ("must3r", 512, 288, "dust3r", 16, False),
+    "vggt_omega": ("vggt-omega", 512, 288, "identity", 16, False),  # gated weights: needs HF access
+}
+CKPT_DIR = Path("/content/ckpt")
+CHECKPOINTS = {
+    "must3r": ["https://download.europe.naverlabs.com/ComputerVision/MUSt3R/MUSt3R_512.pth",
+               "https://download.europe.naverlabs.com/ComputerVision/MUSt3R/MUSt3R_512_retrieval_trainingfree.pth",
+               "https://download.europe.naverlabs.com/ComputerVision/MUSt3R/MUSt3R_512_retrieval_codebook.pkl"],
+    "vggt_omega": ["hf://facebook/VGGT-Omega/vggt_omega_1b_512.pt"],
+}
+MODELS = ["mapanything", "vggt", *EXTERNAL]
 
 
 # ---- setup ------------------------------------------------------------------------------
 
 def install(model: str) -> None:
-    repo = {"mapanything": "https://github.com/facebookresearch/map-anything.git",
-            "vggt": "https://github.com/facebookresearch/vggt.git"}[model]
+    repo = ("https://github.com/facebookresearch/vggt.git" if model == "vggt"
+            else "https://github.com/facebookresearch/map-anything.git")
     dst = Path("/content") / Path(repo).stem
     if not dst.exists():
         subprocess.run(["git", "clone", "--depth", "1", repo, str(dst)], check=True)
-    if model == "mapanything":
+    if model in EXTERNAL:
+        extra = EXTERNAL[model][0]
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", f"{dst}[{extra}]" if extra else str(dst)],
+                       check=True)
+        # the wrappers' Hydra configs want a "machine": point every folder at /content
+        CKPT_DIR.mkdir(parents=True, exist_ok=True)
+        (dst / "configs" / "machine" / "colab.yaml").write_text("\n".join(
+            f"{k}: {CKPT_DIR if 'checkpoint' in k else '/content/unused'}" for k in (
+                "root_data_dir", "mapanything_dataset_metadata_dir", "root_pretrained_checkpoints_dir",
+                "root_experiments_dir", "root_uniception_pretrained_checkpoints_dir",
+                "external_benchmark_data_root_data_dir")) + "\n")
+        for url in CHECKPOINTS.get(model, []):
+            dest = CKPT_DIR / url.rsplit("/", 1)[1]
+            if dest.exists():
+                continue
+            print(f"[recon] fetching {dest.name}", flush=True)
+            if url.startswith("hf://"):
+                from huggingface_hub import hf_hub_download
+
+                org, name, fname = url[5:].split("/", 2)
+                hf_hub_download(f"{org}/{name}", fname, local_dir=str(CKPT_DIR))
+            else:
+                subprocess.run(["wget", "-q", "-O", str(dest), url], check=True)
+    elif model == "mapanything":
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", str(dst)], check=True)
     else:
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub", "einops", "safetensors"],
@@ -57,6 +99,10 @@ def install(model: str) -> None:
 def load_model(model: str, model_id: str | None):
     import torch
 
+    if model in EXTERNAL:
+        from mapanything.models import init_model_from_config
+
+        return init_model_from_config(model, device="cuda", machine="colab").eval(), f"map-anything wrapper: {model}"
     if model == "mapanything":
         from mapanything.models import MapAnything
 
@@ -101,6 +147,38 @@ def run_mapanything(model, paths: list[Path], K: np.ndarray | None = None) -> li
                     "valid": p["mask"][0, ..., 0].bool().cpu().numpy() & (depth > 0),
                     "rgb": np.clip(p["img_no_norm"][0].float().cpu().numpy() * (255 if p["img_no_norm"].max() <= 1.5 else 1),
                                    0, 255).astype(np.uint8)})
+    return out
+
+
+def run_external(model, paths: list[Path], K: np.ndarray | None = None, name: str = "") -> list[dict]:
+    """Any model in EXTERNAL, through MapAnything's wrapper and output post-processing (images only)."""
+    import torch
+    from mapanything.utils.image import load_images
+    from mapanything.utils.inference import postprocess_model_outputs_for_inference
+
+    _, w, h, norm, patch, _ = EXTERNAL[name]
+    views = load_images([str(p) for p in paths], resize_mode="fixed_size", size=(w, h), norm_type=norm,
+                        patch_size=patch)
+    for v in views:
+        for k, val in list(v.items()):
+            if torch.is_tensor(val):
+                v[k] = val.to("cuda")
+    with torch.no_grad():
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            raw = model(views)
+        preds = postprocess_model_outputs_for_inference(raw, views, apply_mask=False)
+    out = []
+    for p in preds:
+        depth = p["depth_z"][0, ..., 0].float().cpu().numpy()
+        if depth.shape != (MODEL_H, MODEL_W):
+            raise RuntimeError(f"{name} returned depth {depth.shape}, expected {(MODEL_H, MODEL_W)}")
+        conf = p["conf"][0].float().cpu().numpy() if "conf" in p else np.ones_like(depth)
+        if conf.ndim == 3:
+            conf = conf[..., 0]
+        img = p["img_no_norm"][0].float().cpu().numpy()
+        out.append({"c2w": p["camera_poses"][0].float().cpu().numpy(), "K": p["intrinsics"][0].float().cpu().numpy(),
+                    "depth": depth, "conf": conf, "valid": np.isfinite(depth) & (depth > 0),
+                    "rgb": np.clip(img * (255 if img.max() <= 1.5 else 1), 0, 255).astype(np.uint8)})
     return out
 
 
@@ -250,7 +328,7 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--frames", required=True, type=Path, help="folder with frames/ and frames.json (from mise)")
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--model", choices=["mapanything", "vggt"], default="mapanything")
+    ap.add_argument("--model", choices=MODELS, default="mapanything")
     ap.add_argument("--model-id", help="Hugging Face id (default: facebook/map-anything or facebook/VGGT-1B)")
     ap.add_argument("--t0", type=float)
     ap.add_argument("--t1", type=float)
@@ -262,6 +340,9 @@ def main(argv=None) -> None:
                     "default: FRAMES/intrinsics.json if there is one)")
     ap.add_argument("--no-install", action="store_true")
     a = ap.parse_args(argv)
+    global MODEL_W, MODEL_H
+    if a.model in EXTERNAL:
+        MODEL_W, MODEL_H = EXTERNAL[a.model][1:3]
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     started = time.time()
 
@@ -300,7 +381,13 @@ def main(argv=None) -> None:
         print(f"[recon] known intrinsics: fx {fx:.1f} fy {fy:.1f} cx {cx:.1f} cy {cy:.1f} (frame pixels)", flush=True)
     model, model_id = load_model(a.model, a.model_id)
     gpu = torch.cuda.get_device_name(0)
-    runner = run_mapanything if a.model == "mapanything" else run_vggt
+    if a.model in EXTERNAL:
+        def runner(m, ps, k):
+            return run_external(m, ps, k, a.model)
+        if K is not None:
+            print(f"[recon] {a.model} runs on images only here: the intrinsics are not used", flush=True)
+    else:
+        runner = run_mapanything if a.model == "mapanything" else run_vggt
     print(f"[recon] loaded {model_id} on {gpu} in {time.time() - started:.0f} s", flush=True)
 
     n = len(sel)
@@ -343,7 +430,7 @@ def main(argv=None) -> None:
                         conf=np.stack([conf_small[i] for i in sorted(done)]),
                         scale_xy=np.array([fw / (MODEL_W / 2), fh / (MODEL_H / 2)]))
     (a.out / "frames.json").write_text(json.dumps([{"name": sel[i]["name"], "t": sel[i]["t"]} for i in sorted(done)]))
-    meta = {"model": a.model, "model_id": model_id, "metric": a.model == "mapanything", "gpu": gpu,
+    meta = {"model": a.model, "model_id": model_id, "metric": a.model == "mapanything" or EXTERNAL.get(a.model, (0,) * 6)[5], "gpu": gpu,
             "intrinsics_given": None if K is None else [round(float(v), 2) for v in (K[0, 0] / sx, K[1, 1] / sy, K[0, 2] / sx, K[1, 2] / sy)],
             "frames": len(done), "t0": sel[0]["t"], "t1": sel[-1]["t"], "points": writer.n_points,
             "chunks": chunks, "seconds": round(time.time() - started, 1), "model_size": [MODEL_W, MODEL_H],

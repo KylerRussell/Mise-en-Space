@@ -51,7 +51,8 @@ def main(argv=None) -> None:
                     help="folder with frames/ and frames.json picked by mise (extract_sharp_frames)")
     ap.add_argument("--t0", type=float)
     ap.add_argument("--t1", type=float)
-    ap.add_argument("--model", choices=["mapanything", "vggt"], default="mapanything")
+    ap.add_argument("--model", default="mapanything",
+                    help="mapanything, vggt, or one of learned_recon.EXTERNAL (pi3, pi3x, da3, da3_nested, must3r, ...)")
     ap.add_argument("--gpu", default="A100,G4,H100,L4",
                     help="GPUs to try in order until one is free (T4, L4, G4, A100, H100)")
     ap.add_argument("--wait", type=float, default=60, help="minutes to keep trying for a free GPU")
@@ -100,14 +101,27 @@ def main(argv=None) -> None:
     try:
         colab("upload", "-s", session, str(pack), "/content/in.tgz", timeout=1800)
         colab("upload", "-s", session, str(HERE / "learned_recon.py"), "/content/learned_recon.py", timeout=300)
-        remote(session, f"""
-import subprocess, shlex, sys
-subprocess.run(["tar", "xzf", "/content/in.tgz", "-C", "/content"], check=True)
-cmd = [sys.executable, "-u", "/content/learned_recon.py", *{args!r}]
-open("/content/run.sh", "w").write(shlex.join(cmd) + " > /content/recon.log 2>&1; echo $? > /content/exit_code\\n")
-subprocess.Popen(["bash", "/content/run.sh"], start_new_session=True)
-print("started:", shlex.join(cmd))
-""")
+        start = f"""
+import os, subprocess, shlex, sys
+if os.path.exists("/content/run.sh"):  # an earlier attempt got this far: don't start a second job
+    print("already started")
+else:
+    subprocess.run(["tar", "xzf", "/content/in.tgz", "-C", "/content"], check=True)
+    cmd = [sys.executable, "-u", "/content/learned_recon.py", *{args!r}]
+    open("/content/run.sh.tmp", "w").write(shlex.join(cmd) + " > /content/recon.log 2>&1; echo $? > /content/exit_code\\n")
+    os.rename("/content/run.sh.tmp", "/content/run.sh")
+    subprocess.Popen(["bash", "/content/run.sh"], start_new_session=True)
+    print("started:", shlex.join(cmd))
+"""
+        for attempt in range(4):  # the exec call itself can time out now and then
+            try:
+                print("  " + remote(session, start).strip()[-300:], flush=True)
+                break
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                print(f"  (start attempt {attempt + 1} failed: {str(e).strip().splitlines()[-1][-120:]})", flush=True)
+                if attempt == 3:
+                    raise
+                time.sleep(20)
         seen, code, misses = 0, None, 0
         while code is None:
             time.sleep(30)

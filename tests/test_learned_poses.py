@@ -179,3 +179,40 @@ def test_join_windows_on_shared_pixels(tmp_path):
     for k in kept:
         cv2.imwrite(str(fdir / k["name"]), np.full((720, 1280, 3), 90, np.uint8))
     assert import_poses(tmp_path / "joined", tmp_path / "work", fdir)["metric"]
+
+
+def test_box_of_known_size_sets_the_scale(tmp_path):
+    """A 0.5 x 0.3048 m rim at 0.25 m, clicked in the frames of a solve that is 1.7x too small."""
+    from mise.eval.floorplan import box_check
+    from mise.pipeline.scan import ScanOptions, _scale_and_level
+
+    n = 30
+    truth = [_c2w([0.8 + 2.4 * i / (n - 1), 1.5 + 0.4 * np.sin(i / 4), 1.45], 25 * i) for i in range(n)]
+    frames = [_frame(M) for M in truth]
+    frames = [{**f, "depth": np.where(np.isfinite(f["depth"]), f["depth"], 0.0)} for f in frames]
+    kept = [{"name": f"frame_{i:04d}.jpg", "t": i / 3} for i in range(n)]
+    small = [_similarity(f, 1.7, np.eye(3), np.zeros(3)) for f in frames]
+    _write_solve(tmp_path / "s", small, kept, range(n), metric=False)
+
+    c, yaw, a, b = np.array([3.1, 2.5]), np.radians(20), 0.5, 0.3048
+    u, v = np.array([np.cos(yaw), np.sin(yaw)]), np.array([-np.sin(yaw), np.cos(yaw)])
+    rim = {k: np.r_[c + sx * a / 2 * u + sy * b / 2 * v, 0.25]
+           for k, (sx, sy) in {"FL": (-1, -1), "FR": (1, -1), "BR": (1, 1), "BL": (-1, 1)}.items()}
+    Kf = np.diag([1280 / W, 720 / H, 1.0]) @ K
+    clicks = {}
+    for i, M in enumerate(truth):
+        seen = {}
+        for k, X in rim.items():
+            x = M[:3, :3].T @ (X - M[:3, 3])
+            uv = (Kf @ x)[:2] / x[2]
+            if x[2] > 0.2 and 0 <= uv[0] < 1280 and 0 <= uv[1] < 720:
+                seen[k] = uv.tolist()
+        if len(seen) >= 2:
+            clicks[kept[i]["name"]] = seen
+    assert sum(len(s) for s in clicks.values()) >= 8
+
+    rec = pycolmap.Reconstruction(str(tmp_path / "s" / "sparse" / "0"))
+    L, _ = _scale_and_level(rec, ScanOptions(scene_id="t", scale=1.0))
+    got = box_check(rec, L, {"known_m": 0.3048, "known_side": "short", "clicks": clicks})
+    assert got["rim_rms_px"] < 1.0
+    assert abs(got["factor"] - 1.7) < 0.017  # 1%

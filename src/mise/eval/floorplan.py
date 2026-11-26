@@ -226,7 +226,34 @@ def load_solve(path: Path):
     return recs, meta, frames
 
 
-def score(path: Path, plan: dict, room: str, scene: Path | None = None) -> dict:
+def box_check(rec, L, box: dict) -> dict:
+    """Scale from a reference object of known size: a level rectangle fitted to its clicked rim
+    corners (see pipeline.scale.fit_level_rectangle) through this solve's cameras. `factor`
+    multiplies the solve's (leveled) lengths into meters; rim_rms_px says how well the
+    solve's poses agree with each other around the object."""
+    from ..pipeline import scale as sc
+
+    by_name = {im.name: im for im in rec.images.values()}
+    cams, clicks = {}, {}
+    for n, cs in box["clicks"].items():
+        im = by_name.get(n)
+        if im is None:
+            continue
+        cam = rec.cameras[im.camera_id]
+        K = cam.calibration_matrix()
+        cw = im.cam_from_world()
+        cams[n] = sc.Camera(K=K, R=cw.rotation.matrix(), t=np.asarray(cw.translation))
+        clicks[n] = {k: tuple((K @ np.r_[cam.cam_from_img(np.array([uv], float))[0], 1.0])[:2]) for k, uv in cs.items()}
+    if sum(len(v) for v in clicks.values()) < 6:
+        return {"error": f"the object is clicked in only {len(clicks)} solved frames"}
+    r = sc.fit_level_rectangle(cams, clicks, L.R, L.t / L.scale)  # model units, leveled
+    short = box.get("known_side", "short").startswith("short")
+    side = r.short_side if short else r.long_side
+    return {"frames": len(clicks), "rim_rms_px": round(r.rms_px, 1), "factor": round(box["known_m"] / (side * L.scale), 4),
+            "sigma_pct": round(100 * r.short_side_rel_sigma, 1)}
+
+
+def score(path: Path, plan: dict, room: str, scene: Path | None = None, box: dict | None = None) -> dict:
     from ..pipeline import room_outline
     from ..pipeline.scan import ScanOptions, _scale_and_level
 
@@ -268,6 +295,12 @@ def score(path: Path, plan: dict, room: str, scene: Path | None = None) -> dict:
         "spans": room_spans(Q, plan, room),
         "cams_in_room": fixed.get("cams_in_room"),
     })
+    if box is not None:
+        b = box_check(rec, L, box)
+        if "factor" in b:
+            b["vs_plan_pct"] = round(100 * (b["factor"] / free["s"] - 1), 1)
+            b["span_err_pct"] = {k: round(100 * (v["solve"] * b["factor"] / v["plan"] - 1), 1) for k, v in out["spans"].items()}
+        out["box"] = b
     if scene is not None:  # rooms the scan traced from this solve (same leveled frame)
         sc = json.loads(Path(scene).read_text())
         spaces = {sp["id"]: sp["polygon"] for sp in sc["room"]["spaces"]}
@@ -284,12 +317,13 @@ def main(argv=None) -> None:
     ap.add_argument("solves", nargs="+", help="LABEL=PATH (learned output folder or scan work folder)")
     ap.add_argument("--scene", type=Path, help="scene.json the scan built from the (one) solve: score its rooms too")
     ap.add_argument("--json", type=Path, help="also write the scores here")
+    ap.add_argument("--box", type=Path, help="clicked rim corners of an object of known size (see box_check)")
     a = ap.parse_args(argv)
     plan = load_plan(a.plan)
     res = {}
     for item in a.solves:
         label, _, path = item.partition("=")
-        res[label] = score(Path(path), plan, a.room, a.scene)
+        res[label] = score(Path(path), plan, a.room, a.scene, json.loads(a.box.read_text()) if a.box else None)
         print(f"== {label}: {json.dumps(res[label], default=float)}", flush=True)
     if a.json:
         a.json.write_text(json.dumps(res, indent=1, default=float))
