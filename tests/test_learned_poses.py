@@ -137,3 +137,45 @@ def test_quaternion_round_trip():
         R = cv2.Rodrigues(rng.normal(size=3))[0]
         q = lr.quat_wxyz(R)
         assert np.allclose(pycolmap.Rotation3d(np.array([q[1], q[2], q[3], q[0]])).matrix(), R, atol=1e-6)
+
+
+def _write_solve(path, frames, kept, idx, metric=True):
+    """A learned_recon.py output for frames idx, as the Colab script writes it."""
+    w = lr.ColmapWriter(path / "sparse" / "0", 1280, 720)
+    rng = np.random.default_rng(1)
+    for i in idx:
+        w.add(i + 1, kept[i]["name"], frames[i], 200, rng)
+    w.close()
+    np.savez_compressed(path / "depth.npz", names=np.array([kept[i]["name"] for i in idx]),
+                        depth=np.stack([frames[i]["depth"][::2, ::2] for i in idx]).astype(np.float16),
+                        conf=np.stack([frames[i]["conf"][::2, ::2] for i in idx]).astype(np.float16),
+                        scale_xy=np.array([1280 / (W / 2), 720 / (H / 2)]))
+    (path / "frames.json").write_text(json.dumps([kept[i] for i in idx]))
+    (path / "meta.json").write_text(json.dumps({"model": "synthetic", "metric": metric}))
+
+
+def test_join_windows_on_shared_pixels(tmp_path):
+    from mise.pipeline.learned import join
+
+    n = 30
+    truth = [_c2w([0.8 + 2.4 * i / (n - 1), 1.5 + 0.4 * np.sin(i / 4), 1.45], 25 * i) for i in range(n)]
+    frames = [_frame(M) for M in truth]
+    frames = [{**f, "depth": np.where(np.isfinite(f["depth"]), f["depth"], 0.0)} for f in frames]
+    kept = [{"name": f"frame_{i:04d}.jpg", "t": i / 3} for i in range(n)]
+    ax = np.array([0.1, -0.3, 1.0]) / np.linalg.norm([0.1, -0.3, 1.0])
+    Rq = cv2.Rodrigues(ax * np.radians(70))[0]
+    second = [_similarity(f, 1.7, Rq, np.array([-2.0, 0.4, 0.9])) for f in frames]
+    _write_solve(tmp_path / "a", frames, kept, range(0, 20))
+    _write_solve(tmp_path / "b", second, kept, range(12, 30))
+    meta = join([tmp_path / "b", tmp_path / "a"], tmp_path / "joined")  # order given doesn't matter
+    rep = meta["joins"][1]
+    assert meta["frames"] == n and meta["metric"]
+    assert rep["shared"] == 8 and abs(rep["scale"] - 1.7) < 0.01 and rep["median_cm"] < 1.0 and rep["camera_gap_cm"] < 1.0
+    rec = pycolmap.Reconstruction(str(tmp_path / "joined" / "sparse" / "0"))
+    got = {im.name: im.projection_center() for im in rec.images.values()}
+    assert max(np.linalg.norm(got[k["name"]] - truth[i][:3, 3]) for i, k in enumerate(kept)) < 0.01
+    fdir = tmp_path / "picked"
+    fdir.mkdir()
+    for k in kept:
+        cv2.imwrite(str(fdir / k["name"]), np.full((720, 1280, 3), 90, np.uint8))
+    assert import_poses(tmp_path / "joined", tmp_path / "work", fdir)["metric"]

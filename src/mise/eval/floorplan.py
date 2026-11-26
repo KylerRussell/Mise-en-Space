@@ -145,6 +145,46 @@ def room_spans(Q: np.ndarray, plan: dict, room: str, band: float = 0.6, min_pts:
     return out
 
 
+def score_rooms(spaces: dict[str, list], plan: dict, s: float, R: np.ndarray, t: np.ndarray,
+                cell: float = 0.02) -> dict:
+    """How well traced rooms (scene spaces, in the solve's frame) match the plan's rooms.
+
+    Each space is moved onto the plan with the fit (x -> s R x + t), then for each plan room:
+    the space that overlaps it most, their IoU, and the space's area as a share of the room's.
+    For each space: the share of its area that falls in other plan rooms (closets swallowed,
+    rooms merged) or outside every room (walls placed too far out).
+    """
+    import cv2
+
+    rooms = {k: np.asarray(v["polygon"], float) for k, v in plan["rooms"].items()}
+    moved = {k: s * np.asarray(v, float) @ R.T + t for k, v in spaces.items()}
+    allp = np.vstack(list(rooms.values()) + list(moved.values()))
+    lo = allp.min(0) - 0.5
+    shape = tuple((np.ceil((allp.max(0) + 0.5 - lo) / cell)).astype(int)[::-1])
+
+    def mask(poly):
+        m = np.zeros(shape, np.uint8)
+        cv2.fillPoly(m, [np.round((poly - lo) / cell).astype(np.int32)], 1)
+        return m.astype(bool)
+
+    pm = {k: mask(v) for k, v in rooms.items()}
+    sm = {k: mask(v) for k, v in moved.items()}
+    any_room = np.any(list(pm.values()), axis=0)
+    out = {"rooms": {}, "spaces": {}}
+    for rk, m in pm.items():
+        best = max(sm, key=lambda k: (sm[k] & m).sum(), default=None)
+        if best is None or not (sm[best] & m).any():
+            out["rooms"][rk] = {"space": None}
+            continue
+        inter, union = (sm[best] & m).sum(), (sm[best] | m).sum()
+        out["rooms"][rk] = {"space": best, "iou": round(inter / union, 3), "area_ratio": round(sm[best].sum() / m.sum(), 3)}
+    for sk, m in sm.items():
+        share = {rk: round((m & pm[rk]).sum() / m.sum(), 3) for rk in pm if (m & pm[rk]).any()}
+        out["spaces"][sk] = {"area_m2": round(m.sum() * cell * cell, 2), "in_rooms": share,
+                             "outside_plan": round((m & ~any_room).sum() / m.sum(), 3)}
+    return out
+
+
 def load_solve(path: Path):
     """A learned-model output (meta.json + sparse/0) or a scan work folder (largest piece)."""
     import pycolmap
@@ -157,7 +197,7 @@ def load_solve(path: Path):
     return recs, meta, frames
 
 
-def score(path: Path, plan: dict, room: str) -> dict:
+def score(path: Path, plan: dict, room: str, scene: Path | None = None) -> dict:
     from ..pipeline import room_outline
     from ..pipeline.scan import ScanOptions, _scale_and_level
 
@@ -198,6 +238,10 @@ def score(path: Path, plan: dict, room: str) -> dict:
                         "best_scale": round(float((free["d"] < 0.1).mean()), 2)},
         "spans": room_spans(Q, plan, room),
     })
+    if scene is not None:  # rooms the scan traced from this solve (same leveled frame)
+        sc = json.loads(Path(scene).read_text())
+        spaces = {sp["id"]: sp["polygon"] for sp in sc["room"]["spaces"]}
+        out["traced"] = score_rooms(spaces, plan, fixed["s"], fixed["R"], fixed["t"])
     if out["ceiling_m"] is not None:
         out["ceiling_m"] = round(out["ceiling_m"], 2)
     return out
@@ -208,13 +252,14 @@ def main(argv=None) -> None:
     ap.add_argument("plan", type=Path)
     ap.add_argument("--room", required=True, help="the plan's room the stretch was filmed in")
     ap.add_argument("solves", nargs="+", help="LABEL=PATH (learned output folder or scan work folder)")
+    ap.add_argument("--scene", type=Path, help="scene.json the scan built from the (one) solve: score its rooms too")
     ap.add_argument("--json", type=Path, help="also write the scores here")
     a = ap.parse_args(argv)
     plan = load_plan(a.plan)
     res = {}
     for item in a.solves:
         label, _, path = item.partition("=")
-        res[label] = score(Path(path), plan, a.room)
+        res[label] = score(Path(path), plan, a.room, a.scene)
         print(f"== {label}: {json.dumps(res[label], default=float)}", flush=True)
     if a.json:
         a.json.write_text(json.dumps(res, indent=1, default=float))

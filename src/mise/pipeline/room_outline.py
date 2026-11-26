@@ -27,6 +27,7 @@ class Outline:
     free: np.ndarray  # the free-space grid (for debugging plots)
     origin: tuple[float, float]
     cell: float
+    kind: str = "room"  # "closet": a pocket split off the room it opens off
 
 
 # Sight lines go only to points this high: above most furniture, so lines pass over sofas,
@@ -197,9 +198,15 @@ class HomeOutline:
 
 def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | None = None, cell: float = 0.05,
                  min_hits: int = 3, core_m: float = 1.0, min_room_m2: float = 1.5, min_edge: float = 0.3,
-                 z_band: tuple[float, float] = Z_BAND) -> HomeOutline:
+                 z_band: tuple[float, float] = Z_BAND, pocket_m2: float = 0.45, pocket_mouth_m: float = 1.2,
+                 body_m: float = 1.4) -> HomeOutline:
     """Free space -> rooms. Doorways (narrower than core_m) separate rooms; open-plan areas stay one
-    room (split those into zones in software). Returns rectilinear outlines and the doorways found."""
+    room (split those into zones in software). Returns rectilinear outlines and the doorways found.
+
+    Closets and nooks too small to hold a room core of their own would be grown into the room
+    they open off; instead, a part of a room that its body (the room opened by a core_m disk)
+    doesn't cover, at least `pocket_m2` big and joined to the body by a mouth no wider than
+    `pocket_mouth_m`, becomes its own space with a doorway at the mouth."""
     import cv2
     from collections import deque
 
@@ -228,11 +235,41 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
             if 0 <= yy < H and 0 <= xx < W and free[yy, xx] and labels[yy, xx] < 0:
                 labels[yy, xx] = labels[y, x]
                 q.append((yy, xx))
+    # closets and nooks: pockets of a room its body doesn't reach, joined by a narrow mouth
+    n_main = len(keep)
+    small = set()
+    # a square (walls run along x and y), so the body can't reach through a mouth narrower than
+    # body_m into what lies behind it, and keeps the room's own corners
+    rb = max(1, int(round(body_m / 2 / cell)))
+    square = np.ones((2 * rb + 1, 2 * rb + 1), np.uint8)
+    for k in range(n_main):
+        m = (labels == k).astype(np.uint8)
+        body = cv2.morphologyEx(m, cv2.MORPH_OPEN, square)
+        if body.sum() < 0.5 * m.sum():
+            continue  # a narrow room (hallway): no body to hang pockets off
+        pocket = (m & (1 - body)).astype(np.uint8)
+        pocket = cv2.morphologyEx(pocket, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        npk, plab, pstats, _ = cv2.connectedComponentsWithStats(pocket)
+        grown = cv2.dilate(body, np.ones((3, 3), np.uint8))
+        for j in range(1, npk):
+            if pstats[j, cv2.CC_STAT_AREA] * cell * cell < pocket_m2:
+                continue
+            pm = plab == j
+            mouth = pm & grown.astype(bool)
+            ys, xs = np.nonzero(mouth)
+            if not len(ys):
+                continue
+            width = max(np.ptp(xs), np.ptp(ys)) * cell + cell
+            if width > pocket_mouth_m:
+                continue
+            new = len(keep) + len(small)
+            labels[pm] = new
+            small.add(new)
     rooms, index = [], {}
     ceiling = outline_ceiling(points)
-    for k in range(len(keep)):
+    for k in range(n_main + len(small)):
         m = (labels == k).astype(np.uint8)
-        if m.sum() * cell * cell < min_room_m2:
+        if m.sum() * cell * cell < (pocket_m2 if k in small else min_room_m2):
             continue
         cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         c = max(cs, key=cv2.contourArea)
@@ -243,7 +280,7 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
         poly, area = _finish(poly, INSET * cell)
         index[k] = len(rooms)
         rooms.append(Outline(polygon=[(float(a), float(b)) for a, b in poly], area_m2=area, ceiling_m=ceiling,
-                             free=grid, origin=origin, cell=cell))
+                             free=grid, origin=origin, cell=cell, kind="closet" if k in small else "room"))
     # doorways: where two rooms' cells touch
     doorways = []
     for axis, (dy, dx) in (("x", (1, 0)), ("y", (0, 1))):
@@ -296,7 +333,7 @@ class EdgeFix:
 
 def push_furniture_edges(rooms: list[Outline], points: np.ndarray, low: tuple[float, float] = (0.1, 1.4),
                          max_push: float = 1.0, min_push: float = 0.2, margin: float = 0.03,
-                         slab: float = 0.05) -> list[EdgeFix]:
+                         slab: float = 0.05, skip: set[tuple[int, int]] | None = None) -> list[EdgeFix]:
     """Move walls that are really furniture fronts back to the wall behind them (in place).
 
     Free space stops at whatever the camera couldn't see past, so a long sideboard or bookcase
@@ -308,6 +345,8 @@ def push_furniture_edges(rooms: list[Outline], points: np.ndarray, low: tuple[fl
     """
     fixes = []
     for ri, r in enumerate(rooms):
+        if r.kind == "closet":
+            continue  # shallow, walls close to the camera: nothing stands in front of them
         poly = np.array(r.polygon, float)
         n = len(poly)
         others = [np.array(o.polygon) for k, o in enumerate(rooms) if k != ri]
@@ -316,7 +355,7 @@ def push_furniture_edges(rooms: list[Outline], points: np.ndarray, low: tuple[fl
             a, b = poly[i], poly[(i + 1) % n]
             e = b - a
             L = float(np.linalg.norm(e))
-            if L < 0.6:
+            if L < 0.6 or (skip and (ri, i) in skip):
                 continue
             u = e / L
             out = np.array([u[1], -u[0]])  # outside for CCW
@@ -351,6 +390,110 @@ def push_furniture_edges(rooms: list[Outline], points: np.ndarray, low: tuple[fl
             r.polygon = [(round(float(p), 3), round(float(q), 3)) for p, q in poly]
             r.area_m2 = 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
     return fixes
+
+
+def snap_edges_to_walls(rooms: list[Outline], cams: np.ndarray, sights: list[np.ndarray], band: tuple[float, float] = (1.3, 2.3),
+                        reach: float = 0.6, min_move: float = 0.05, min_pts: int = 40,
+                        bin_m: float = 0.02) -> tuple[list[EdgeFix], set[tuple[int, int]]]:
+    """Move each wall to where the points seen from inside its room say it is (in place).
+
+    Free space stops short of walls by however far the points scatter, and at furniture the
+    camera couldn't see past. Above furniture height, though, the wall itself is what the
+    cameras see: for each edge, the densest layer of points between 1.3 and 2.3 m within
+    `reach` of it, seen from cameras inside the room (so a neighbor's side of a shared wall
+    doesn't count), is the wall. Dense learned depth gives plenty of such points even on
+    plain walls; sparse solves often don't, and those edges are left for push_furniture_edges.
+
+    Returns the walls moved and every (room, edge) whose wall layer was found, moved or not
+    (leave those out of push_furniture_edges: their wall is known).
+    """
+    fixes, placed = [], set()
+    for ri, r in enumerate(rooms):
+        poly = np.array(r.polygon, float)
+        n = len(poly)
+        inside = [k for k, c in enumerate(cams) if _inside(poly, c[:2]) and len(sights[k])]
+        if len(inside) < 3:
+            continue
+        P = np.vstack([sights[k] for k in inside])
+        P = P[(P[:, 2] > band[0]) & (P[:, 2] < band[1])]
+        moves = []
+        for i in range(n):
+            a, b = poly[i], poly[(i + 1) % n]
+            e = b - a
+            L = float(np.linalg.norm(e))
+            if L < 0.4:
+                continue
+            u = e / L
+            out = np.array([u[1], -u[0]])
+            rel = P[:, :2] - a
+            s_, d = rel @ u, rel @ out
+            sel = (s_ > 0.15) & (s_ < L - 0.15) & (np.abs(d) < reach)
+            if sel.sum() < min_pts:
+                continue
+            dd = d[sel]
+            edges = np.arange(-reach, reach + bin_m, bin_m)
+            h, _ = np.histogram(dd, edges)
+            h = np.convolve(h, [1, 2, 3, 2, 1], mode="same")
+            peak = edges[int(h.argmax())] + bin_m / 2
+            near = np.abs(dd - peak) < 0.06
+            if near.sum() < max(min_pts // 2, 0.2 * len(dd)):
+                continue  # no clear wall layer
+            at = float(np.median(dd[near]))
+            placed.add((ri, i))
+            if abs(at) < min_move:
+                continue
+            moves.append((i, out * at, int(near.sum()), at))
+        for i, v, cnt, at in moves:
+            poly[i] = poly[i] + v
+            poly[(i + 1) % n] = poly[(i + 1) % n] + v
+            fixes.append(EdgeFix(ri, i, round(at, 2), f"wall layer of {cnt} points {at:+.2f} m from the free-space edge"))
+        if moves:
+            x, y = poly[:, 0], poly[:, 1]
+            r.polygon = [(round(float(p_), 3), round(float(q), 3)) for p_, q in poly]
+            r.area_m2 = 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    return fixes, placed
+
+
+def settle_closets(rooms: list[Outline], reach: float = 0.25) -> int:
+    """Put each closet's mouth on the wall line of the room it opens off (in place).
+
+    A closet's free space starts inside the doorway, so its outline overlaps the room's by the
+    wall's thickness or so. Each closet edge that lies within `reach` of a parallel edge of a
+    room (overlapping along its length) takes that edge's line. Returns the edges moved.
+    """
+    moved = 0
+    for c in rooms:
+        if c.kind != "closet":
+            continue
+        cp = np.array(c.polygon, float)
+        n = len(cp)
+        for i in range(n):
+            a, b = cp[i], cp[(i + 1) % n]
+            axis = 0 if abs(a[0] - b[0]) < 1e-6 else 1  # 0: edge at fixed x
+            if abs(a[axis] - b[axis]) > 1e-6:
+                continue
+            lo, hi = sorted([a[1 - axis], b[1 - axis]])
+            best = None
+            for r in rooms:
+                if r is c or r.kind == "closet":
+                    continue
+                rp = np.array(r.polygon, float)
+                for p_, q in zip(rp, np.roll(rp, -1, axis=0)):
+                    if abs(p_[axis] - q[axis]) > 1e-6:
+                        continue
+                    rlo, rhi = sorted([p_[1 - axis], q[1 - axis]])
+                    if min(hi, rhi) - max(lo, rlo) < 0.3 or abs(p_[axis] - a[axis]) > reach:
+                        continue
+                    if best is None or abs(p_[axis] - a[axis]) < abs(best - a[axis]):
+                        best = p_[axis]
+            if best is not None and abs(best - a[axis]) > 1e-3:
+                cp[i][axis] = best
+                cp[(i + 1) % n][axis] = best
+                moved += 1
+        x, y = cp[:, 0], cp[:, 1]
+        c.polygon = [(round(float(p_), 3), round(float(q), 3)) for p_, q in cp]
+        c.area_m2 = abs(0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+    return moved
 
 
 def _inside(poly: np.ndarray, p) -> bool:

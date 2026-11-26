@@ -87,3 +87,50 @@ def test_home_scene_from_outline():
     assert {o.wall.split(".")[0] for o in sc.room.openings} == {"room_1", "room_2"}
     assert all(abs(o.width - 0.8) < 1e-9 for o in sc.room.openings)
     assert check_layout(sc) == []  # the two rooms are joined through the doorway
+
+
+def test_fuzzy_walls_furniture_and_a_closet():
+    """Dense, noisy learned depth: walls are a fuzzy layer, a sideboard stands against one wall, and
+    a reach-in closet opens off the room. The room keeps its true walls; the closet is its own space."""
+    rng = np.random.default_rng(3)
+    # room 0..4 x 0..3.6; closet 4.12..4.72 x 1.0..2.4, opening 1.2..2.2 in the wall x = 4..4.12
+    walls = [((0, 0), (4, 0)), ((4, 0), (4, 1.2)), ((4, 2.2), (4, 3.6)), ((4, 3.6), (0, 3.6)), ((0, 3.6), (0, 0)),
+             ((4, 1.2), (4.12, 1.2)), ((4, 2.2), (4.12, 2.2)), ((4.12, 1.2), (4.12, 1.0)), ((4.12, 1.0), (4.72, 1.0)),
+             ((4.72, 1.0), (4.72, 2.4)), ((4.72, 2.4), (4.12, 2.4)), ((4.12, 2.4), (4.12, 2.2))]
+    segs = [(np.array(a, float), np.array(b, float)) for a, b in walls]
+    pts = []
+    for a, b in segs:
+        t = rng.uniform(0, 1, max(4, int(300 * np.linalg.norm(b - a))))
+        e = (b - a) / np.linalg.norm(b - a)
+        xy = a + (b - a) * t[:, None] + np.array([e[1], -e[0]]) * rng.normal(0, 0.08, len(t))[:, None]
+        pts.append(np.c_[xy, rng.uniform(0.1, 2.4, len(t))])
+    # a 0.45 m deep sideboard along the south wall, 0.9 m tall: its front and top are points too
+    side = np.c_[rng.uniform(0.5, 3.0, 1500), rng.uniform(0.0, 0.45, 1500), rng.uniform(0.1, 0.9, 1500)]
+    pts = np.vstack(pts + [side])
+    cams = np.array([(x, y, 1.45) for x in (0.8, 1.6, 2.4, 3.2) for y in (0.9, 1.8, 2.7)] + [(3.6, 1.7, 1.45), (3.8, 1.5, 1.4)])
+
+    def visible(c, p):
+        q = p[:2] + (c[:2] - p[:2]) * 0.12 / max(np.linalg.norm(c[:2] - p[:2]), 1e-9)
+        if 0.5 < p[0] < 3.0 and p[1] < 0.45 and p[2] > 0.9 and c[1] > 0.45:
+            return True  # sideboard top and front
+        blocked = any(_cross(c[:2], q, a, b) for a, b in segs)
+        behind_side = c[2] > 0 and p[2] < 0.9 and p[1] < 0.45 and 0.5 < p[0] < 3.0 and not (0.40 < p[1] < 0.45)
+        return not blocked and not behind_side
+
+    sights = [np.array([p for p in pts if visible(c, p)]) for c in cams]
+    home = room_outline.segment_home(cams, sights, pts)
+    _, placed = room_outline.snap_edges_to_walls(home.rooms, cams, sights)
+    room_outline.push_furniture_edges(home.rooms, pts, skip=placed)
+    room_outline.settle_closets(home.rooms)
+    areas = sorted(r.area_m2 for r in home.rooms)
+    assert len(home.rooms) == 2, areas
+    assert abs(areas[1] - 14.4) / 14.4 < 0.06  # the room, walls on the wall layer, not at the sideboard
+    assert 0.6 < areas[0] < 1.05  # the closet: 0.84 m2, plus the doorway's depth through the wall
+    closet = min(home.rooms, key=lambda r: r.area_m2)
+    assert closet.kind == "closet"
+    room_poly, closet_poly = np.array(max(home.rooms, key=lambda r: r.area_m2).polygon), np.array(closet.polygon)
+    assert closet_poly[:, 0].min() >= room_poly[:, 0].max() - 0.01  # no overlap: the mouth is on the room's wall
+    room = max(home.rooms, key=lambda r: r.area_m2)
+    ys = [y for _, y in room.polygon]
+    assert min(ys) < 0.08  # south wall at the wall, behind the sideboard
+    assert any(set(d.rooms) == {0, 1} for d in home.doorways)

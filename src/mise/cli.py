@@ -12,6 +12,7 @@
   mise stage-commands CAPTURE_DIR   print the Nerfstudio commands for a capture
   mise scan VIDEO --scene ID        walkthrough video -> base layout (rooms, doors, built-ins, finishes)
             [--poses DIR]           ... with cameras solved elsewhere (scripts/colab/run_learned_recon.py)
+  mise join-poses OUT DIR DIR...    join learned solves of overlapping stretches into one (for --poses)
 """
 
 from __future__ import annotations
@@ -196,6 +197,15 @@ def cmd_scan(args):
     print(json.dumps(res.to_dict(), indent=1, default=str))
 
 
+def cmd_join_poses(args):
+    from .pipeline.learned import join
+
+    meta = join([Path(d) for d in args.solves], Path(args.out))
+    for r in meta["joins"]:
+        print(json.dumps(r), flush=True)
+    print(f"{meta['frames']} frames, {meta['points']} points -> {args.out}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mise", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", default=os.environ.get("MISE_DATA", "data/scenes"), help="scene store directory")
@@ -230,6 +240,10 @@ def main(argv=None):
                    "(frames.json, sparse/0, meta.json)")
     a.add_argument("--frames", help="with --poses: folder holding the frames it names (default: POSES/frames)")
     a.set_defaults(fn=cmd_scan)
+
+    a = sub.add_parser("join-poses", help="join learned solves of overlapping stretches of one video")
+    a.add_argument("out"); a.add_argument("solves", nargs="+")
+    a.set_defaults(fn=cmd_join_poses)
 
     args = p.parse_args(argv)
     args.fn(args)
