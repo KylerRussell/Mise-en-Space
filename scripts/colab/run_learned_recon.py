@@ -73,6 +73,8 @@ def main(argv=None) -> None:
         data = json.dumps(sel).encode()
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
+        if (a.frames / "intrinsics.json").exists():  # the camera's calibration travels with its frames
+            tar.add(a.frames / "intrinsics.json", "in/intrinsics.json")
 
     args = ["--frames", "/content/in", "--out", "/content/out", "--model", a.model]
     args += [f"--t0={a.t0}"] if a.t0 is not None else []

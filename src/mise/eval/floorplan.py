@@ -88,20 +88,49 @@ def _rot(deg: float) -> np.ndarray:
     return np.array([[c, -s], [s, c]])
 
 
-def best_fit(P: np.ndarray, cams: np.ndarray, plan: dict, room: str, with_scale: bool = False) -> dict:
+def best_fit(P: np.ndarray, cams: np.ndarray, plan: dict, room: str, with_scale: bool = False,
+             spread: float = 2.0, step: float = 0.5) -> dict:
+    """The plan's walls fitted to the points: a wide search over starts (the four 90-degree
+    turns, and offsets up to `spread` around the room the stretch was filmed in) on a subset of
+    the points, then the best few refined on all of them. A narrow search can lock onto a
+    wrong but plausible match (an L-shaped room slid over its neighbors)."""
     segs, _ = plan_segments(plan)
     target = np.asarray(plan["rooms"][room]["polygon"], float).mean(0)
-    best = None
+    rng = np.random.default_rng(0)
+    sub = P[rng.choice(len(P), min(len(P), 1500), replace=False)]
+    offs = np.arange(-spread, spread + 1e-9, step)
+    starts = []
     for yaw in (0, 90, 180, 270):
         R0 = _rot(yaw)
-        for dx in (-1.0, 0.0, 1.0):
-            for dy in (-1.0, 0.0, 1.0):
+        for dx in offs:
+            for dy in offs:
                 t0 = target + np.array([dx, dy]) - R0 @ cams.mean(0)
-                f = fit_plan(P, segs, R0, t0)
-                if best is None or f["trimmed"] < best["trimmed"]:
-                    best = f
+                f = fit_plan(sub, segs, R0, t0, iters=25)
+                starts.append(f)
+    starts.sort(key=lambda f: f["trimmed"])
+    # walls alone can be ambiguous (a long room turned onto a column of two rooms): the cameras
+    # must also stand inside the home, and mostly in the room the stretch was filmed in
+    import cv2
+
+    polys = {k: np.asarray(v["polygon"], np.float32) for k, v in plan["rooms"].items()}
+
+    def inside(poly, Q):
+        return np.array([cv2.pointPolygonTest(poly.reshape(-1, 1, 2), (float(x), float(y)), False) >= 0 for x, y in Q])
+
+    best = None
+    for f0 in starts[:12]:
+        f = fit_plan(P, segs, f0["R"], f0["t"], iters=40)
+        Q = f["s"] * cams @ f["R"].T + f["t"]
+        in_any = np.any([inside(pp, Q) for pp in polys.values()], axis=0).mean()
+        in_room = inside(polys[room], Q).mean()
+        f["cost"] = f["trimmed"] + 0.5 * (1 - in_any) + 0.2 * (1 - in_room)
+        f["cams_in_room"] = round(float(in_room), 2)
+        if best is None or f["cost"] < best["cost"]:
+            best = f
     if with_scale:
+        keep = best.get("cams_in_room")
         best = fit_plan(P, segs, best["R"], best["t"], best["s"], with_scale=True, iters=40)
+        best["cams_in_room"] = keep
     return best
 
 
@@ -237,6 +266,7 @@ def score(path: Path, plan: dict, room: str, scene: Path | None = None) -> dict:
         "within_10cm": {"as_scaled": round(float((fixed["d"] < 0.1).mean()), 2),
                         "best_scale": round(float((free["d"] < 0.1).mean()), 2)},
         "spans": room_spans(Q, plan, room),
+        "cams_in_room": fixed.get("cams_in_room"),
     })
     if scene is not None:  # rooms the scan traced from this solve (same leveled frame)
         sc = json.loads(Path(scene).read_text())

@@ -72,11 +72,21 @@ def load_model(model: str, model_id: str | None):
 # Every runner returns, per frame (model input size MODEL_H x MODEL_W):
 #   c2w (4x4, OpenCV axes), K (3x3), depth (HxW, z-depth), conf (HxW), valid (HxW bool), rgb (HxWx3 uint8)
 
-def run_mapanything(model, paths: list[Path]) -> list[dict]:
+def run_mapanything(model, paths: list[Path], K: np.ndarray | None = None) -> list[dict]:
+    """K: the camera's intrinsics at the model's input size; without them the model guesses
+    a focal length per frame, and a wrong one shrinks or stretches the room across the view."""
     import torch
-    from mapanything.utils.image import load_images
 
-    views = load_images([str(p) for p in paths])
+    if K is None:
+        from mapanything.utils.image import load_images
+
+        views = load_images([str(p) for p in paths])
+    else:
+        from mapanything.utils.image import preprocess_inputs
+        from PIL import Image
+
+        views = preprocess_inputs([{"img": np.asarray(Image.open(p).convert("RGB")), "intrinsics": K.astype(np.float32)}
+                                   for p in paths])
     with torch.no_grad():
         preds = model.infer(views, memory_efficient_inference=True, use_amp=True, amp_dtype="bf16",
                             apply_mask=True, mask_edges=True)
@@ -94,7 +104,7 @@ def run_mapanything(model, paths: list[Path]) -> list[dict]:
     return out
 
 
-def run_vggt(model, paths: list[Path]) -> list[dict]:
+def run_vggt(model, paths: list[Path], K: np.ndarray | None = None) -> list[dict]:  # VGGT takes no intrinsics
     import torch
     from vggt.utils.load_fn import load_and_preprocess_images
     from vggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -248,6 +258,8 @@ def main(argv=None) -> None:
     ap.add_argument("--overlap", type=int, default=24, help="frames shared by consecutive chunks")
     ap.add_argument("--points-per-frame", type=int, default=500)
     ap.add_argument("--limit", type=int, help="only the first N frames of the stretch (smoke test)")
+    ap.add_argument("--intrinsics", help="the camera's fx,fy,cx,cy in frame pixels (MapAnything uses them; "
+                    "default: FRAMES/intrinsics.json if there is one)")
     ap.add_argument("--no-install", action="store_true")
     a = ap.parse_args(argv)
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -278,6 +290,14 @@ def main(argv=None) -> None:
         install(a.model)
     import torch
 
+    K = None
+    kfile = a.frames / "intrinsics.json"
+    if a.intrinsics or kfile.exists():
+        fx, fy, cx, cy = (map(float, a.intrinsics.split(",")) if a.intrinsics else
+                          (json.loads(kfile.read_text())[k] for k in ("fx", "fy", "cx", "cy")))
+        sx, sy = MODEL_W / fw, MODEL_H / fh
+        K = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1.0]])
+        print(f"[recon] known intrinsics: fx {fx:.1f} fy {fy:.1f} cx {cx:.1f} cy {cy:.1f} (frame pixels)", flush=True)
     model, model_id = load_model(a.model, a.model_id)
     gpu = torch.cuda.get_device_name(0)
     runner = run_mapanything if a.model == "mapanything" else run_vggt
@@ -293,7 +313,7 @@ def main(argv=None) -> None:
     for ci, s0 in enumerate(starts):
         s1 = min(s0 + a.chunk, n)
         t = time.time()
-        frs = runner(model, paths[s0:s1])
+        frs = runner(model, paths[s0:s1], K)
         torch.cuda.empty_cache()
         cur = {s0 + i: fr for i, fr in enumerate(frs)}
         info = {"chunk": ci, "frames": [s0, s1], "seconds": round(time.time() - t, 1),
@@ -324,6 +344,7 @@ def main(argv=None) -> None:
                         scale_xy=np.array([fw / (MODEL_W / 2), fh / (MODEL_H / 2)]))
     (a.out / "frames.json").write_text(json.dumps([{"name": sel[i]["name"], "t": sel[i]["t"]} for i in sorted(done)]))
     meta = {"model": a.model, "model_id": model_id, "metric": a.model == "mapanything", "gpu": gpu,
+            "intrinsics_given": None if K is None else [round(float(v), 2) for v in (K[0, 0] / sx, K[1, 1] / sy, K[0, 2] / sx, K[1, 2] / sy)],
             "frames": len(done), "t0": sel[0]["t"], "t1": sel[-1]["t"], "points": writer.n_points,
             "chunks": chunks, "seconds": round(time.time() - started, 1), "model_size": [MODEL_W, MODEL_H],
             "frame_size": [fw, fh]}

@@ -13,6 +13,7 @@
   mise scan VIDEO --scene ID        walkthrough video -> base layout (rooms, doors, built-ins, finishes)
             [--poses DIR]           ... with cameras solved elsewhere (scripts/colab/run_learned_recon.py)
   mise join-poses OUT DIR DIR...    join learned solves of overlapping stretches into one (for --poses)
+  mise calibrate FRAMES [--t0 --t1] the camera's intrinsics from a CPU solve of one stretch (intrinsics.json)
 """
 
 from __future__ import annotations
@@ -200,10 +201,17 @@ def cmd_scan(args):
 def cmd_join_poses(args):
     from .pipeline.learned import join
 
-    meta = join([Path(d) for d in args.solves], Path(args.out))
+    meta = join([Path(d) for d in args.solves], Path(args.out), square=args.square)
     for r in meta["joins"]:
         print(json.dumps(r), flush=True)
     print(f"{meta['frames']} frames, {meta['points']} points -> {args.out}")
+
+
+def cmd_calibrate(args):
+    from .pipeline.learned import calibrate
+
+    out = calibrate(Path(args.frames), Path(args.work or Path(args.frames) / "calibration"), args.t0, args.t1)
+    print(json.dumps(out, indent=1))
 
 
 def main(argv=None):
@@ -243,7 +251,14 @@ def main(argv=None):
 
     a = sub.add_parser("join-poses", help="join learned solves of overlapping stretches of one video")
     a.add_argument("out"); a.add_argument("solves", nargs="+")
+    a.add_argument("--square", action="store_true", help="also line up floors and wall directions with the first solve")
     a.set_defaults(fn=cmd_join_poses)
+
+    a = sub.add_parser("calibrate", help="camera intrinsics from a CPU solve of one stretch of picked frames")
+    a.add_argument("frames", help="folder with frames/ and frames.json (picked by mise)")
+    a.add_argument("--t0", type=float, default=0.0); a.add_argument("--t1", type=float, default=60.0)
+    a.add_argument("--work", help="scratch folder (default: FRAMES/calibration)")
+    a.set_defaults(fn=cmd_calibrate)
 
     args = p.parse_args(argv)
     args.fn(args)

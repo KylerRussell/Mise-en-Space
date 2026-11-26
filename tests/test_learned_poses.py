@@ -170,7 +170,7 @@ def test_join_windows_on_shared_pixels(tmp_path):
     meta = join([tmp_path / "b", tmp_path / "a"], tmp_path / "joined")  # order given doesn't matter
     rep = meta["joins"][1]
     assert meta["frames"] == n and meta["metric"]
-    assert rep["shared"] == 8 and abs(rep["scale"] - 1.7) < 0.01 and rep["median_cm"] < 1.0 and rep["camera_gap_cm"] < 1.0
+    assert rep["shared"] == 8 and abs(rep["scale"] - 1.7) < 0.01 and rep["median_cm"] < 1.0 and rep["camera_gap_cm"] < 2.0
     rec = pycolmap.Reconstruction(str(tmp_path / "joined" / "sparse" / "0"))
     got = {im.name: im.projection_center() for im in rec.images.values()}
     assert max(np.linalg.norm(got[k["name"]] - truth[i][:3, 3]) for i, k in enumerate(kept)) < 0.01

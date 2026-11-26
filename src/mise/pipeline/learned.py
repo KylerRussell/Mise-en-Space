@@ -125,6 +125,48 @@ def robust_similarity(X: np.ndarray, Y: np.ndarray, rounds: int = 6) -> tuple[fl
                      "all_median_cm": round(100 * float(np.median(res)), 1)}
 
 
+def level_rotation(frames: dict[str, Frame], rng: np.random.Generator) -> np.ndarray | None:
+    """World -> leveled rotation of one solve: floor normal onto +z, then walls onto x/y."""
+    from . import normalize, ply
+
+    pts = np.vstack([f.points for f in frames.values() if len(f.points)])
+    if len(pts) < 500:
+        return None
+    if len(pts) > 40000:
+        pts = pts[rng.choice(len(pts), 40000, replace=False)]
+    up = -np.mean([f.c2w[:3, 1] for f in frames.values()], axis=0)  # camera y points down
+    up /= np.linalg.norm(up)
+    try:
+        floor = normalize.ransac_plane(pts, iters=600, thresh=0.04, up_hint=up, max_tilt_deg=35, rng=rng)
+    except Exception:  # noqa: BLE001
+        return None
+    n = floor.n if floor.n @ up > 0 else -floor.n
+    R1 = ply.rotation_between(n, np.array([0.0, 0, 1]))
+    p1 = pts @ R1.T
+    h = p1[:, 2] - np.percentile(p1[:, 2], 2)
+    band = (h > 0.3) & (h < 2.0)
+    if band.sum() < 200:
+        return R1
+    return ply.rot_z(normalize.manhattan_yaw(p1[band, :2], bin_size=0.03)) @ R1
+
+
+def square_up(R: np.ndarray, R_ref: np.ndarray, R_new: np.ndarray) -> tuple[np.ndarray, float]:
+    """Correct a join's rotation R (new world -> reference world) so the new solve's floor and
+    walls line up with the reference's: same up, wall directions a multiple of 90 degrees apart.
+    Rooms of one home share a floor and (nearly always) wall directions, and the join's own
+    rotation, fitted on a few seconds of shared frames, is its least certain part."""
+    from . import ply
+
+    D = R_ref @ R @ R_new.T  # the new solve's level axes, as seen in the reference's level frame
+    tilt = ply.rotation_between(D[:, 2], np.array([0.0, 0, 1]))
+    D1 = tilt @ D
+    yaw = np.degrees(np.arctan2(D1[1, 0], D1[0, 0]))
+    snap = ply.rot_z(-(yaw - 90 * np.round(yaw / 90)))
+    E = snap @ tilt
+    angle = float(np.degrees(np.arccos(np.clip((np.trace(E) - 1) / 2, -1, 1))))
+    return R_ref.T @ E @ R_ref @ R, angle
+
+
 def _apply(fr: Frame, s: float, R: np.ndarray, t: np.ndarray) -> Frame:
     c2w = np.eye(4)
     c2w[:3, :3] = R @ fr.c2w[:3, :3]
@@ -134,7 +176,8 @@ def _apply(fr: Frame, s: float, R: np.ndarray, t: np.ndarray) -> Frame:
                  points=s * fr.points @ R.T + t, uv=fr.uv, rgb=fr.rgb, edge=fr.edge)
 
 
-def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0) -> tuple[dict[str, Frame], np.ndarray, list[dict]]:
+def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0,
+                square: bool = False) -> tuple[dict[str, Frame], np.ndarray, list[dict]]:
     """Frames of all solves in the first one's world, and a report per join."""
     rng = np.random.default_rng(seed)
     solves = sorted((load_solve(p) for p in paths), key=lambda s: min(f.t for f in s.frames.values()))
@@ -153,6 +196,16 @@ def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0) -> tupl
         if len(X) < 100:
             raise RuntimeError(f"{sv.path} shares {len(shared)} frames with the solves before it: too few to join")
         s, R, t, rep = robust_similarity(X, Y)
+        if square:
+            R_ref, R_new = level_rotation(merged, rng), level_rotation(sv.frames, rng)
+            if R_ref is not None and R_new is not None:
+                R, turned = square_up(R, R_ref, R_new)
+                t, keep = np.zeros(3), np.ones(len(X), bool)
+                for _ in range(4):  # the offset again, with the squared rotation
+                    t = np.median(Y[keep] - s * X[keep] @ R.T, axis=0)
+                    res = np.linalg.norm(s * X @ R.T + t - Y, axis=1)
+                    keep = res <= max(0.05, 2.5 * np.median(res[keep]))
+                rep.update({"squared_deg": round(turned, 2), "median_cm": round(100 * float(np.median(res[keep])), 1)})
         moved = {n: _apply(f, s, R, t) for n, f in sv.frames.items()}
         cams = np.array([[np.linalg.norm(moved[n].c2w[:3, 3] - merged[n].c2w[:3, 3]),
                           np.degrees(np.arccos(np.clip((np.trace(moved[n].c2w[:3, :3].T @ merged[n].c2w[:3, :3]) - 1) / 2, -1, 1)))]
@@ -219,11 +272,51 @@ def _quat_wxyz(m: np.ndarray) -> np.ndarray:
     return q / np.linalg.norm(q) * (1 if q[0] >= 0 else -1)
 
 
-def join(paths: list[Path], out: Path) -> dict:
-    """Join the solves in `paths` (each a learned_recon.py output) into `out`; returns meta.json."""
-    frames, px, reports = join_solves(paths)
+def join(paths: list[Path], out: Path, square: bool = False) -> dict:
+    """Join the solves in `paths` (each a learned_recon.py output) into `out`; returns meta.json.
+    square: also line up each solve's floor and walls with the first's (see square_up)."""
+    frames, px, reports = join_solves(paths, square=square)
     metas = [load_solve(p).meta for p in paths]
     meta = {"model": metas[0].get("model"), "model_id": metas[0].get("model_id"),
             "metric": all(m.get("metric") for m in metas), "joined_from": [str(p) for p in paths]}
     write_joined(frames, px, reports, out, meta)
     return json.loads((Path(out) / "meta.json").read_text())
+
+
+def calibrate(frames_dir: Path, work: Path, t0: float = 0.0, t1: float = 60.0, min_frames: int = 30) -> dict:
+    """The camera's intrinsics from a COLMAP solve (CPU) of one stretch of the picked frames.
+
+    A learned model told the real focal length builds rooms the right size; left to guess, it
+    was 7% off on a phone video and the rooms came out 6% small across. Bundle adjustment over
+    a well-textured stretch where the phone moves (not just turns) pins the focal length down.
+    Uses the scan's own solve (contrast-boosted frames, neighbor + revisit matching). Writes
+    frames_dir/intrinsics.json and returns it.
+    """
+    import shutil
+
+    from .scan import ScanEvents, ScanOptions, _features, _solve
+
+    frames_dir, work = Path(frames_dir), Path(work)
+    kept = [k for k in json.loads((frames_dir / "frames.json").read_text()) if t0 <= k["t"] <= t1]
+    if len(kept) < min_frames:
+        raise RuntimeError(f"only {len(kept)} frames in {t0}-{t1} s to calibrate from")
+    if work.exists():
+        shutil.rmtree(work)
+    (work / "frames").mkdir(parents=True)
+    for k in kept:
+        shutil.copy2(frames_dir / "frames" / k["name"], work / "frames" / k["name"])
+    ev = ScanEvents()
+    db = _features(work, kept, ScanOptions(scene_id="calibrate"), ev)
+    recs = _solve(work, db, len(kept), ev)
+    if not recs or recs[0].num_reg_images() < min_frames:
+        n = recs[0].num_reg_images() if recs else 0
+        raise RuntimeError(f"only {n} of {len(kept)} frames solved in {t0}-{t1} s: calibrate on a stretch "
+                           "where the phone walks past textured things")
+    best = recs[0]
+    cam = next(iter(best.cameras.values()))
+    fx, fy, cx, cy, k1, k2, p1, p2 = (float(v) for v in cam.params[:8])
+    out = {"fx": round(fx, 2), "fy": round(fy, 2), "cx": round(cx, 2), "cy": round(cy, 2), "k1": round(k1, 4),
+           "k2": round(k2, 4), "p1": round(p1, 4), "p2": round(p2, 4), "width": cam.width, "height": cam.height,
+           "source": f"COLMAP self-calibration of {best.num_reg_images()} of {len(kept)} frames, {t0:g}-{t1:g} s"}
+    (frames_dir / "intrinsics.json").write_text(json.dumps(out, indent=1))
+    return out
