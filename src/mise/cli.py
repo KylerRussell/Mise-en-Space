@@ -12,6 +12,7 @@
   mise stage-commands CAPTURE_DIR   print the Nerfstudio commands for a capture
   mise scan VIDEO --scene ID        walkthrough video -> base layout (rooms, doors, built-ins, finishes)
             [--poses DIR]           ... with cameras solved elsewhere (scripts/colab/run_learned_recon.py)
+  mise learned-scan VIDEO --scene ID  video -> scene with a learned model on Colab (rough pass, room windows, chain)
   mise join-poses OUT DIR DIR...    join learned solves of overlapping stretches into one (for --poses)
   mise calibrate FRAMES [--t0 --t1] the camera's intrinsics from a CPU solve of one stretch (intrinsics.json)
 """
@@ -198,6 +199,17 @@ def cmd_scan(args):
     print(json.dumps(res.to_dict(), indent=1, default=str))
 
 
+def cmd_learned_scan(args):
+    from .pipeline.learned_flow import solve_home
+
+    work = Path(args.work or Path(args.data).parent / "scans" / args.scene)
+    home = solve_home(Path(args.video), work / "learned-run", tag=args.scene, model=args.model, gpu=args.gpu, fps=args.fps,
+                      say=lambda m: print(f"[learned] {m}", flush=True))
+    args.poses, args.frames, args.work = str(home), str(work / "learned-run" / "picked"), str(work)
+    args.resume, args.t0, args.t1 = False, None, None
+    cmd_scan(args)
+
+
 def cmd_join_poses(args):
     from .pipeline.learned import join
 
@@ -249,6 +261,14 @@ def main(argv=None):
                    "(frames.json, sparse/0, meta.json)")
     a.add_argument("--frames", help="with --poses: folder holding the frames it names (default: POSES/frames)")
     a.set_defaults(fn=cmd_scan)
+
+    a = sub.add_parser("learned-scan", help="video -> scene, cameras solved by a learned model on Colab, room by room")
+    a.add_argument("video"); a.add_argument("--scene", required=True); a.add_argument("--name", default="Scanned home")
+    a.add_argument("--fps", type=float, default=3.0); a.add_argument("--scale", type=float, help="known scale; default: the model's (metric)")
+    a.add_argument("--work", help="work folder (default: next to the scene store)")
+    a.add_argument("--model", default="da3_nested", help="learned_recon.py model (default: Depth Anything 3, metric)")
+    a.add_argument("--gpu", default="G4,H100", help="Colab GPUs to try, in order")
+    a.set_defaults(fn=cmd_learned_scan)
 
     a = sub.add_parser("join-poses", help="join learned solves of overlapping stretches of one video")
     a.add_argument("out"); a.add_argument("solves", nargs="+")

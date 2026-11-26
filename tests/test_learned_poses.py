@@ -239,3 +239,24 @@ def test_rooms_placed_on_a_skeleton(tmp_path):
     rec = pycolmap.Reconstruction(str(tmp_path / "j" / "sparse" / "0"))
     got = {im.name: im.projection_center() for im in rec.images.values()}
     assert max(np.linalg.norm(got[k["name"]] - truth[i][:3, 3]) for i, k in enumerate(kept)) < 0.01
+
+
+def test_windows_follow_the_rooms():
+    from mise.pipeline.learned import plan_windows
+
+    t = np.arange(0, 290, 1 / 3)
+    rooms = np.where(t < 137, 0, np.where(t < 190, 1, 2))
+    rng = np.random.default_rng(0)
+    flicker = (t > 135) & (t < 190) & (rng.uniform(size=len(t)) < 0.1)  # a doorway, seen badly
+    rooms = np.where(flicker, 0, rooms)
+    noisy = t >= 190  # after 190 s the rough pass can't tell the small rooms apart
+    rooms = np.where(noisy, rng.integers(0, 3, len(t)), rooms)
+    w = plan_windows(t, rooms, max_frames=450)
+    assert len(w) == 3, w
+    (a0, a1), (b0, b1), (c0, c1) = w
+    assert a0 == 0 and abs(a1 - 142) < 3          # main room, reaching 5 s into the next
+    assert abs(b0 - 132) < 3 and abs(b1 - 195) < 4  # bedroom
+    assert abs(c0 - 185) < 4 and c1 > 289          # the rest, together
+    long = plan_windows(t, np.zeros(len(t), int), max_frames=300)  # one room, 870 frames
+    assert len(long) >= 3 and all(b - a <= 300 / 3 + 1 for a, b in long)
+    assert all(long[i][1] > long[i + 1][0] for i in range(len(long) - 1))  # they overlap

@@ -314,6 +314,12 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
     for axis, (dy, dx) in (("x", (1, 0)), ("y", (0, 1))):
         a, b = labels[: H - dy, : W - dx], labels[dy:, dx:]
         touch = (a >= 0) & (b >= 0) & (a != b)
+        if inner is not free:  # where rooms touch through a wall's cells, that is wall, not doorway
+            open_ = touch & (inner[: H - dy, : W - dx] > 0) & (inner[dy:, dx:] > 0)
+            for ka, kb in {(int(u), int(v)) for u, v in zip(a[touch], b[touch])}:
+                pair = touch & (a == ka) & (b == kb)
+                if (open_ & pair).any():
+                    touch = touch & ~(pair & ~open_)
         pairs: dict[tuple[int, int], list[tuple[int, int]]] = {}
         for y, x in zip(*np.nonzero(touch)):
             ka, kb = int(a[y, x]), int(b[y, x])
@@ -322,7 +328,15 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
         for (ia, ib), cells in pairs.items():
             cells = np.array(cells)
             along = cells[:, 1] if axis == "x" else cells[:, 0]
+            # the longest unbroken run: one doorway, not the span between two gaps in a wall
+            order = np.argsort(along)
+            cells, along = cells[order], along[order]
+            runs = np.split(np.arange(len(along)), np.nonzero(np.diff(along) > 2)[0] + 1)
+            run = max(runs, key=len)
+            cells, along = cells[run], along[run]
             width = (along.max() - along.min() + 1) * cell
+            if inner is not free:  # the wall cells were grown by a cell on each side, into the jambs
+                width += 2 * cell
             cy, cx = cells.mean(0)
             center = ((cx + 0.5 + dx / 2) * cell + origin[0], (cy + 0.5 + dy / 2) * cell + origin[1])
             doorways.append(Doorway(center=(float(center[0]), float(center[1])), width=float(width), rooms=(ia, ib), axis=axis))

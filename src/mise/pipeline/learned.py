@@ -346,3 +346,59 @@ def calibrate(frames_dir: Path, work: Path, t0: float = 0.0, t1: float = 60.0, m
            "source": f"COLMAP self-calibration of {best.num_reg_images()} of {len(kept)} frames, {t0:g}-{t1:g} s"}
     (frames_dir / "intrinsics.json").write_text(json.dumps(out, indent=1))
     return out
+
+
+def plan_windows(times: np.ndarray, rooms: np.ndarray, smooth_s: float = 8.0, min_run_s: float = 40.0,
+                 overlap_s: float = 5.0, max_frames: int = 600) -> list[tuple[float, float]]:
+    """Stretches of the walk to solve one by one, from the room each frame was taken in.
+
+    A model solves one room in one pass far better than a stretch that wanders through several,
+    and room solves chain well through a few seconds of shared frames. `rooms` (one label per
+    frame, from a rough pass over the whole walk) is smoothed over `smooth_s`; runs of one room at
+    least `min_run_s` long become windows, and stretches where the label flickers (the rough
+    pass couldn't tell the rooms apart there) become one window together. Each window reaches
+    `overlap_s` into its neighbours; windows over `max_frames` are cut into overlapping parts.
+    Returns (t0, t1) per window, in walk order.
+    """
+    order = np.argsort(times)
+    t, r = np.asarray(times, float)[order], np.asarray(rooms)[order]
+    n = len(t)
+    if n == 0:
+        return []
+    sm = r.copy()
+    for i in range(n):  # the most common label within smooth_s / 2
+        w = r[(t >= t[i] - smooth_s / 2) & (t <= t[i] + smooth_s / 2)]
+        vals, cnt = np.unique(w, return_counts=True)
+        sm[i] = vals[np.argmax(cnt)]
+    runs, s = [], 0
+    for i in range(1, n + 1):
+        if i == n or sm[i] != sm[s]:
+            runs.append([s, i - 1, t[i - 1] - t[s] >= min_run_s])
+            s = i
+    # merge: consecutive short runs into one; a short run between two long runs goes with the
+    # stretch of short runs it belongs to (or, alone, into the earlier long run)
+    merged = []
+    for a, b, long_ in runs:
+        if merged and not long_ and not merged[-1][2]:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b, long_])
+    out = []
+    for k, (a, b, long_) in enumerate(merged):
+        if not long_ and b - a < 3 and out:  # a blip: let the previous window reach over it
+            out[-1][1] = b
+            continue
+        out.append([a, b])
+    fps = (n - 1) / max(t[-1] - t[0], 1e-6)
+    windows = []
+    for a, b in out:
+        t0, t1 = max(t[0], t[a] - overlap_s), min(t[-1], t[b] + overlap_s)
+        k = int(np.sum((t >= t0) & (t <= t1)))
+        if k <= max_frames:
+            windows.append((float(t0), float(t1)))
+            continue
+        parts = int(np.ceil((k - 2 * overlap_s * fps) / (max_frames - 2 * overlap_s * fps)))
+        edges = np.linspace(t0, t1, parts + 1)
+        for p in range(parts):
+            windows.append((float(max(t0, edges[p] - overlap_s)), float(min(t1, edges[p + 1] + overlap_s))))
+    return windows
