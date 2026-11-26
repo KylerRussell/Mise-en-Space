@@ -142,7 +142,7 @@ print("@@EXIT@@", open("/content/exit_code").read().strip() if os.path.exists("/
             log, _, tail = text.rpartition("@@EXIT@@")
             lines = log.rstrip("\n").splitlines()
             for line in lines[seen:]:
-                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line:
+                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line or 'File "' in line:
                     print("  " + line[-300:], flush=True)
             seen = len(lines)
             code = int(tail.strip()) if tail.strip() else None

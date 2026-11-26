@@ -49,6 +49,7 @@ CHECKPOINTS = {
                "https://download.europe.naverlabs.com/ComputerVision/MUSt3R/MUSt3R_512_retrieval_codebook.pkl"],
     "vggt_omega": ["hf://facebook/VGGT-Omega/vggt_omega_1b_512.pt"],
 }
+EXTRA_PIP = {"da3": ["addict", "scikit-learn"], "da3_nested": ["addict", "scikit-learn"]}  # used, not declared
 MODELS = ["mapanything", "vggt", *EXTERNAL]
 
 
@@ -62,8 +63,9 @@ def install(model: str) -> None:
         subprocess.run(["git", "clone", "--depth", "1", repo, str(dst)], check=True)
     if model in EXTERNAL:
         extra = EXTERNAL[model][0]
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", f"{dst}[{extra}]" if extra else str(dst)],
-                       check=True)
+        # some extras pin "python<=3.13", which pip reads as 3.13.0 and so rules out Colab's 3.13.x
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--ignore-requires-python", "-e",
+                        f"{dst}[{extra}]" if extra else str(dst), *EXTRA_PIP.get(model, [])], check=True)
         # the wrappers' Hydra configs want a "machine": point every folder at /content
         CKPT_DIR.mkdir(parents=True, exist_ok=True)
         (dst / "configs" / "machine" / "colab.yaml").write_text("\n".join(
@@ -159,7 +161,8 @@ def run_external(model, paths: list[Path], K: np.ndarray | None = None, name: st
     _, w, h, norm, patch, _ = EXTERNAL[name]
     views = load_images([str(p) for p in paths], resize_mode="fixed_size", size=(w, h), norm_type=norm,
                         patch_size=patch)
-    for v in views:
+    for i, v in enumerate(views):
+        v["label"], v["instance"] = ["mise"], [f"{i:05d}"]  # MUSt3R names views by these
         for k, val in list(v.items()):
             if torch.is_tensor(val):
                 v[k] = val.to("cuda")
@@ -175,6 +178,8 @@ def run_external(model, paths: list[Path], K: np.ndarray | None = None, name: st
         conf = p["conf"][0].float().cpu().numpy() if "conf" in p else np.ones_like(depth)
         if conf.ndim == 3:
             conf = conf[..., 0]
+        if conf.shape != depth.shape:  # some models give no per-pixel confidence
+            conf = np.ones_like(depth)
         img = p["img_no_norm"][0].float().cpu().numpy()
         out.append({"c2w": p["camera_poses"][0].float().cpu().numpy(), "K": p["intrinsics"][0].float().cpu().numpy(),
                     "depth": depth, "conf": conf, "valid": np.isfinite(depth) & (depth > 0),
