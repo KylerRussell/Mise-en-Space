@@ -176,20 +176,35 @@ def _apply(fr: Frame, s: float, R: np.ndarray, t: np.ndarray) -> Frame:
                  points=s * fr.points @ R.T + t, uv=fr.uv, rgb=fr.rgb, edge=fr.edge)
 
 
-def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0,
-                square: bool = False) -> tuple[dict[str, Frame], np.ndarray, list[dict]]:
-    """Frames of all solves in the first one's world, and a report per join."""
+def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0, square: bool = False,
+                onto: Path | None = None) -> tuple[dict[str, Frame], np.ndarray, list[dict]]:
+    """Frames of all solves in one world, and a report per join.
+
+    Without `onto`, solves are chained in time: each joins the ones before it, through the frames
+    they share (a few seconds at a doorway), in the first one's world.
+    With `onto` (a solve of the whole walk, the skeleton), each solve joins the skeleton alone
+    through every frame it covers: the skeleton says where each room is, the room's own solve
+    gives its shape. Frames no room solve covers keep the skeleton's pose.
+    """
     rng = np.random.default_rng(seed)
     solves = sorted((load_solve(p) for p in paths), key=lambda s: min(f.t for f in s.frames.values()))
-    first = solves[0]
-    merged = dict(first.frames)
-    px = first.depth_px
-    reports = [{"solve": str(first.path), "frames": len(first.frames), "reference": True}]
-    for sv in solves[1:]:
-        shared = sorted(set(merged) & set(sv.frames))
+    if onto is not None:
+        skel = load_solve(onto)
+        target, px = skel.frames, skel.depth_px
+        merged: dict[str, Frame] = {}
+        reports = [{"solve": str(skel.path), "frames": len(skel.frames), "skeleton": True}]
+        todo = solves
+    else:
+        first = solves[0]
+        merged = dict(first.frames)
+        target, px = merged, first.depth_px
+        reports = [{"solve": str(first.path), "frames": len(first.frames), "reference": True}]
+        todo = solves[1:]
+    for sv in todo:
+        shared = sorted(set(target) & set(sv.frames))
         X, Y = [], []
         for n in shared:
-            y, x = correspondences(merged[n], px, sv.frames[n], sv.depth_px, per_frame, rng)
+            y, x = correspondences(target[n], px, sv.frames[n], sv.depth_px, per_frame, rng)
             X.append(x)
             Y.append(y)
         X, Y = np.vstack(X) if X else np.zeros((0, 3)), np.vstack(Y) if Y else np.zeros((0, 3))
@@ -197,7 +212,7 @@ def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0,
             raise RuntimeError(f"{sv.path} shares {len(shared)} frames with the solves before it: too few to join")
         s, R, t, rep = robust_similarity(X, Y)
         if square:
-            R_ref, R_new = level_rotation(merged, rng), level_rotation(sv.frames, rng)
+            R_ref, R_new = level_rotation(target, rng), level_rotation(sv.frames, rng)
             if R_ref is not None and R_new is not None:
                 R, turned = square_up(R, R_ref, R_new)
                 t, keep = np.zeros(3), np.ones(len(X), bool)
@@ -207,8 +222,8 @@ def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0,
                     keep = res <= max(0.05, 2.5 * np.median(res[keep]))
                 rep.update({"squared_deg": round(turned, 2), "median_cm": round(100 * float(np.median(res[keep])), 1)})
         moved = {n: _apply(f, s, R, t) for n, f in sv.frames.items()}
-        cams = np.array([[np.linalg.norm(moved[n].c2w[:3, 3] - merged[n].c2w[:3, 3]),
-                          np.degrees(np.arccos(np.clip((np.trace(moved[n].c2w[:3, :3].T @ merged[n].c2w[:3, :3]) - 1) / 2, -1, 1)))]
+        cams = np.array([[np.linalg.norm(moved[n].c2w[:3, 3] - target[n].c2w[:3, 3]),
+                          np.degrees(np.arccos(np.clip((np.trace(moved[n].c2w[:3, :3].T @ target[n].c2w[:3, :3]) - 1) / 2, -1, 1)))]
                          for n in shared])
         rep.update({"solve": str(sv.path), "frames": len(sv.frames), "shared": len(shared),
                     "camera_gap_cm": round(100 * float(np.median(cams[:, 0])), 1),
@@ -217,6 +232,10 @@ def join_solves(paths: list[Path], per_frame: int = 1500, seed: int = 0,
         for n, f in moved.items():
             if n not in merged or f.edge > merged[n].edge:
                 merged[n] = f
+    if onto is not None:
+        gaps = {n: f for n, f in target.items() if n not in merged}
+        merged.update(gaps)
+        reports[0]["frames_used"] = len(gaps)
     return merged, px, reports
 
 
@@ -272,13 +291,16 @@ def _quat_wxyz(m: np.ndarray) -> np.ndarray:
     return q / np.linalg.norm(q) * (1 if q[0] >= 0 else -1)
 
 
-def join(paths: list[Path], out: Path, square: bool = False) -> dict:
+def join(paths: list[Path], out: Path, square: bool = False, onto: Path | None = None) -> dict:
     """Join the solves in `paths` (each a learned_recon.py output) into `out`; returns meta.json.
-    square: also line up each solve's floor and walls with the first's (see square_up)."""
-    frames, px, reports = join_solves(paths, square=square)
+    square: also line up each solve's floor and walls with the reference's (see square_up).
+    onto: a solve of the whole walk to place every solve on (see join_solves)."""
+    frames, px, reports = join_solves(paths, square=square, onto=onto)
     metas = [load_solve(p).meta for p in paths]
     meta = {"model": metas[0].get("model"), "model_id": metas[0].get("model_id"),
             "metric": all(m.get("metric") for m in metas), "joined_from": [str(p) for p in paths]}
+    if onto is not None:  # every solve took the skeleton's scale
+        meta.update({"metric": bool(load_solve(onto).meta.get("metric")), "onto": str(onto)})
     write_joined(frames, px, reports, out, meta)
     return json.loads((Path(out) / "meta.json").read_text())
 

@@ -201,7 +201,8 @@ def cmd_scan(args):
 def cmd_join_poses(args):
     from .pipeline.learned import join
 
-    meta = join([Path(d) for d in args.solves], Path(args.out), square=args.square)
+    meta = join([Path(d) for d in args.solves], Path(args.out), square=args.square,
+                onto=Path(args.onto) if args.onto else None)
     for r in meta["joins"]:
         print(json.dumps(r), flush=True)
     print(f"{meta['frames']} frames, {meta['points']} points -> {args.out}")
@@ -252,6 +253,7 @@ def main(argv=None):
     a = sub.add_parser("join-poses", help="join learned solves of overlapping stretches of one video")
     a.add_argument("out"); a.add_argument("solves", nargs="+")
     a.add_argument("--square", action="store_true", help="also line up floors and wall directions with the first solve")
+    a.add_argument("--onto", help="a solve of the whole walk: place each solve on it (rooms keep their own shape)")
     a.set_defaults(fn=cmd_join_poses)
 
     a = sub.add_parser("calibrate", help="camera intrinsics from a CPU solve of one stretch of picked frames")

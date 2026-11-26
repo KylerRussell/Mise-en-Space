@@ -216,3 +216,26 @@ def test_box_of_known_size_sets_the_scale(tmp_path):
     got = box_check(rec, L, {"known_m": 0.3048, "known_side": "short", "clicks": clicks})
     assert got["rim_rms_px"] < 1.0
     assert abs(got["factor"] - 1.7) < 0.017  # 1%
+
+
+def test_rooms_placed_on_a_skeleton(tmp_path):
+    """Two room solves, each in its own world, placed on a whole-walk solve through all their frames."""
+    from mise.pipeline.learned import join
+
+    n = 30
+    truth = [_c2w([0.8 + 2.4 * i / (n - 1), 1.5 + 0.4 * np.sin(i / 4), 1.45], 25 * i) for i in range(n)]
+    frames = [_frame(M) for M in truth]
+    frames = [{**f, "depth": np.where(np.isfinite(f["depth"]), f["depth"], 0.0)} for f in frames]
+    kept = [{"name": f"frame_{i:04d}.jpg", "t": i / 3} for i in range(n)]
+    Rq = cv2.Rodrigues(np.array([0.0, 0.0, np.radians(40)]))[0]
+    _write_solve(tmp_path / "skel", frames, kept, range(n))
+    _write_solve(tmp_path / "a", [_similarity(f, 0.8, Rq, np.array([1.0, 0, 0])) for f in frames], kept, range(0, 16))
+    _write_solve(tmp_path / "b", [_similarity(f, 1.3, Rq.T, np.array([0, 2.0, 0])) for f in frames], kept, range(14, 26))
+    meta = join([tmp_path / "a", tmp_path / "b"], tmp_path / "j", onto=tmp_path / "skel")
+    assert meta["frames"] == n and meta["metric"]
+    reps = {Path(r["solve"]).name: r for r in meta["joins"]}
+    assert reps["skel"]["frames_used"] == 4  # 26-29: no room solve covers them
+    assert abs(reps["a"]["scale"] - 0.8) < 0.01 and abs(reps["b"]["scale"] - 1.3) < 0.01
+    rec = pycolmap.Reconstruction(str(tmp_path / "j" / "sparse" / "0"))
+    got = {im.name: im.projection_center() for im in rec.images.values()}
+    assert max(np.linalg.norm(got[k["name"]] - truth[i][:3, 3]) for i, k in enumerate(kept)) < 0.01
