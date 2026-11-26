@@ -538,8 +538,8 @@ def run_scan(video: Path, work: Path, opts: ScanOptions, store=None, ev: ScanEve
 
         current = "layout"
         ev.stage("layout", "running")
-        cams, sights, points, _names = _merge(L, pieces)
-        home = room_outline.segment_home(cams, sights, points)
+        cams, sights, points, names = _merge(L, pieces)
+        home = room_outline.segment_home(cams, sights, points, walk=cams[np.argsort(names)])  # names sort in time
         # walls where the points above furniture height put them; the furniture test only where those are too few
         snapped, placed = room_outline.snap_edges_to_walls(home.rooms, cams, sights)
         ev.emit("progress", stage="layout", message=f"{len(placed)} walls found on their points, {len(snapped)} moved")

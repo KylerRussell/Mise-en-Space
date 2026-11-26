@@ -199,7 +199,8 @@ class HomeOutline:
 def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | None = None, cell: float = 0.05,
                  min_hits: int = 3, core_m: float = 1.0, min_room_m2: float = 1.5, min_edge: float = 0.3,
                  z_band: tuple[float, float] = Z_BAND, pocket_m2: float = 0.45, pocket_mouth_m: float = 1.2,
-                 body_m: float = 1.4, wall_pts: int | str | None = "auto", wall_band: tuple[float, float] = (1.0, 1.9)) -> HomeOutline:
+                 body_m: float = 1.4, wall_pts: int | str | None = "auto", wall_band: tuple[float, float] = (1.0, 1.9),
+                 walk: np.ndarray | None = None, walk_width: float = 0.45, walk_step: float = 0.8) -> HomeOutline:
     """Free space -> rooms. Doorways (narrower than core_m) separate rooms; open-plan areas stay one
     room (split those into zones in software). Returns rectilinear outlines and the doorways found.
 
@@ -230,13 +231,25 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
         inner = (free & (1 - wall)).astype(np.uint8)
     else:
         inner = free
+    walled = inner is not free  # wall cells in use: cores and growth respect them
+    if walk is not None and len(walk) > 1:
+        # where the phone went, a person walked: the path through a doorway is open even when few
+        # sight lines cross it (a quick step from one small room into the next)
+        path = np.zeros(free.shape, np.uint8)
+        px = np.round((np.asarray(walk)[:, :2] - np.asarray(origin)) / cell).astype(int)
+        th = max(1, int(round(walk_width / cell)))
+        for a, b, ca, cb in zip(px[:-1], px[1:], walk[:-1], walk[1:]):
+            if np.linalg.norm(np.asarray(cb[:2]) - np.asarray(ca[:2])) <= walk_step:
+                cv2.line(path, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), 1, th)
+        free = (free | path).astype(np.uint8)
+        inner = (inner | path).astype(np.uint8) if walled else free
     # room cores: what survives eroding by half a doorway-plus
     r = max(1, int(round(core_m / 2 / cell)))
     disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
     seeds = []
     n, lab, stats, _ = cv2.connectedComponentsWithStats(cv2.erode(inner, disk))
     seeds += [lab == i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] * cell * cell >= 0.25]
-    if inner is not free:
+    if walled:
         # a small room crowded with wall-height things (a bathroom: curtain, mirror, tiles) can lose
         # its core to the wall cells: keep the cores found without them that no new core overlaps
         taken = np.any(seeds, axis=0) if seeds else np.zeros(free.shape, bool)
@@ -253,8 +266,8 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
     # grow cores over free space (breadth first, so each cell goes to the nearest core): first
     # within the walls, then over what is left
     H, W = free.shape
-    for allowed in ([inner, free] if inner is not free else [free]):
-        if allowed is free and inner is not free:
+    for allowed in ([inner, free] if walled else [free]):
+        if allowed is free and walled:
             q = deque(zip(*[a.tolist() for a in np.nonzero(labels >= 0)]))
         while q:
             y, x = q.popleft()
@@ -314,7 +327,7 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
     for axis, (dy, dx) in (("x", (1, 0)), ("y", (0, 1))):
         a, b = labels[: H - dy, : W - dx], labels[dy:, dx:]
         touch = (a >= 0) & (b >= 0) & (a != b)
-        if inner is not free:  # where rooms touch through a wall's cells, that is wall, not doorway
+        if walled:  # where rooms touch through a wall's cells, that is wall, not doorway
             open_ = touch & (inner[: H - dy, : W - dx] > 0) & (inner[dy:, dx:] > 0)
             for ka, kb in {(int(u), int(v)) for u, v in zip(a[touch], b[touch])}:
                 pair = touch & (a == ka) & (b == kb)
@@ -335,7 +348,7 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
             run = max(runs, key=len)
             cells, along = cells[run], along[run]
             width = (along.max() - along.min() + 1) * cell
-            if inner is not free:  # the wall cells were grown by a cell on each side, into the jambs
+            if walled:  # the wall cells were grown by a cell on each side, into the jambs
                 width += 2 * cell
             cy, cx = cells.mean(0)
             center = ((cx + 0.5 + dx / 2) * cell + origin[0], (cy + 0.5 + dy / 2) * cell + origin[1])

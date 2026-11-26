@@ -173,3 +173,31 @@ def test_rooms_stay_apart_when_two_passes_disagree_about_their_wall():
     home = room_outline.segment_home(cams, sights, pts)
     assert len(home.rooms) == 2, sorted(r.area_m2 for r in home.rooms)
     assert len(home.doorways) >= 1
+
+
+def test_a_doorway_walked_through_but_hardly_seen():
+    """Two rooms whose cameras only looked at their own room's walls: the sight lines never cross
+    the doorway, so free space alone has no doorway. The walk through it does."""
+    rng = np.random.default_rng(2)
+    walls = [((0, 0), (3, 0)), ((3, 0), (3, 1.0)), ((3, 1.8), (3, 3)), ((3, 3), (0, 3)), ((0, 3), (0, 0)),
+             ((3.12, 0), (6, 0)), ((6, 0), (6, 3)), ((6, 3), (3.12, 3)), ((3.12, 3), (3.12, 1.8)), ((3.12, 1.0), (3.12, 0)),
+             ((3, 1.0), (3.12, 1.0)), ((3, 1.8), (3.12, 1.8))]
+    pts = []
+    for a, b in walls:
+        a, b = np.array(a, float), np.array(b, float)
+        t = rng.uniform(0, 1, max(4, int(80 * np.linalg.norm(b - a))))
+        pts.append(np.c_[a + (b - a) * t[:, None], rng.uniform(0.1, 2.4, len(t))])
+    pts = np.vstack(pts)
+    left = [(1, 1, 1.5), (2, 2, 1.5), (1.5, 1.4, 1.5), (2.4, 1.0, 1.5)]
+    right = [(4.5, 1, 1.5), (5, 2.2, 1.5), (4, 2.4, 1.5), (3.8, 1.6, 1.5)]
+    sights = [pts[pts[:, 0] < 2.95] for _ in left] + [pts[pts[:, 0] > 3.17] for _ in right]
+    cams = np.array(left + right)
+    def in_wall(home):  # doorways in the wall between the two rooms
+        return [d for d in home.doorways if 2.85 < d.center[0] < 3.3]
+
+    assert not in_wall(room_outline.segment_home(cams, sights))
+    # the walk: around the left room, through the doorway (y 1.4), around the right room
+    knots = np.array([(1, 1, 1.5), (2, 1.4, 1.5), (2.7, 1.4, 1.5), (3.06, 1.4, 1.5), (3.5, 1.4, 1.5), (4.5, 1, 1.5)])
+    walk = np.vstack([a + (b - a) * f for a, b in zip(knots[:-1], knots[1:]) for f in np.linspace(0, 1, 6)[:-1]])
+    found = in_wall(room_outline.segment_home(cams, sights, walk=walk))
+    assert len(found) == 1 and abs(found[0].center[1] - 1.4) < 0.3

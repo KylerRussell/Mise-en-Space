@@ -71,7 +71,7 @@ def frame_rooms(solve: Path) -> tuple[np.ndarray, np.ndarray]:
 
     recs, meta, _ = load_solve(Path(solve))
     L, _ = _scale_and_level(recs[0], ScanOptions(scene_id="rooms", scale=1.0 if meta.get("metric") else None))
-    home = room_outline.segment_home(L.cams, L.sights, L.points)
+    home = room_outline.segment_home(L.cams, L.sights, L.points, walk=L.cams[np.argsort(L.image_names)])
     times = {k["name"]: k["t"] for k in json.loads((Path(solve) / "frames.json").read_text())}
     lab, o = home.labels, np.asarray(home.origin)
     ys, xs = np.nonzero(lab >= 0)
