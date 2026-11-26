@@ -54,23 +54,27 @@ def load_solve(path: Path) -> Solve:
     rec = pycolmap.Reconstruction(str(path / "sparse" / "0"))
     dz = np.load(path / "depth.npz") if (path / "depth.npz").exists() else None
     dmap = {str(n): i for i, n in enumerate(dz["names"])} if dz is not None else {}
+    # an npz decompresses an array on every access: read each once
+    dall, call = (dz["depth"], dz["conf"]) if dz is not None else (None, None)
     t0, t1 = min(times.values()), max(times.values())
     frames = {}
+    pts3d = rec.points3D  # one copy: the binding builds the whole map on every access
+    cams = rec.cameras
     for im in rec.images.values():
-        cam = rec.cameras[im.camera_id]
+        cam = cams[im.camera_id]
         fx, fy, cx, cy = cam.params[:4] if len(cam.params) >= 4 else (cam.params[0], cam.params[0], *cam.params[1:3])
         cw = im.cam_from_world()
         R, t = cw.rotation.matrix(), np.asarray(cw.translation)
         c2w = np.eye(4)
         c2w[:3, :3] = R.T
         c2w[:3, 3] = -R.T @ t
-        obs = [(p.xy, rec.points3D[p.point3D_id]) for p in im.points2D if p.has_point3D()]
+        obs = [(p.xy, pts3d[p.point3D_id]) for p in im.points2D if p.has_point3D()]
         k = dmap.get(im.name)
         frames[im.name] = Frame(
             name=im.name, t=times[im.name], c2w=c2w, K=np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]]),
             size=(cam.width, cam.height),
-            depth=dz["depth"][k].astype(np.float32) if k is not None else None,
-            conf=dz["conf"][k].astype(np.float32) if k is not None else None,
+            depth=dall[k].astype(np.float32) if k is not None else None,
+            conf=call[k].astype(np.float32) if k is not None else None,
             points=np.array([o[1].xyz for o in obs]).reshape(-1, 3), uv=np.array([o[0] for o in obs]).reshape(-1, 2),
             rgb=np.array([o[1].color for o in obs], np.uint8).reshape(-1, 3),
             edge=min(times[im.name] - t0, t1 - times[im.name]))

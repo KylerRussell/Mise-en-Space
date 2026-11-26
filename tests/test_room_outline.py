@@ -134,3 +134,42 @@ def test_fuzzy_walls_furniture_and_a_closet():
     ys = [y for _, y in room.polygon]
     assert min(ys) < 0.08  # south wall at the wall, behind the sideboard
     assert any(set(d.rooms) == {0, 1} for d in home.doorways)
+
+
+def test_rooms_stay_apart_when_two_passes_disagree_about_their_wall():
+    """Two rooms solved in separate passes, joined a little off: each room's copy of the wall between
+    them sits 0.2 m inside the other room, so each room's sight lines run past the other's copy and
+    free space alone crosses the wall. The points on the wall keep the rooms apart."""
+    rng = np.random.default_rng(1)
+
+    def wall_pts(a, b, per_m):
+        a, b = np.array(a, float), np.array(b, float)
+        t = rng.uniform(0, 1, max(4, int(per_m * np.linalg.norm(b - a))))
+        return np.c_[a + (b - a) * t[:, None], rng.uniform(0.1, 2.4, len(t))]
+
+    # left room 0..3 (thinks its east wall is at 3.2), right room 3.12..6 (thinks its west wall is at 2.9),
+    # both with the doorway at y 1.0..1.8
+    left_walls = [((0, 0), (3.2, 0)), ((0, 3), (3.2, 3)), ((0, 0), (0, 3)), ((3.2, 0), (3.2, 1.0)), ((3.2, 1.8), (3.2, 3))]
+    right_walls = [((2.9, 0), (6, 0)), ((2.9, 3), (6, 3)), ((6, 0), (6, 3)), ((2.9, 0), (2.9, 1.0)), ((2.9, 1.8), (2.9, 3))]
+    left = np.vstack([wall_pts(a, b, 150) for a, b in left_walls])
+    right = np.vstack([wall_pts(a, b, 150) for a, b in right_walls])
+    cams_l = [(x, y, 1.5) for x in (0.8, 1.6, 2.4) for y in (0.8, 1.5, 2.2)]
+    cams_r = [(x, y, 1.5) for x in (3.8, 4.6, 5.4) for y in (0.8, 1.5, 2.2)]
+
+    def seen(c, pts, walls):
+        segs = [(np.array(a, float), np.array(b, float)) for a, b in walls]
+        out = []
+        for p in pts:
+            q = p[:2] + (np.array(c[:2]) - p[:2]) * 0.02 / max(np.linalg.norm(np.array(c[:2]) - p[:2]), 1e-9)
+            if not any(_cross(np.array(c[:2]), q, a, b) for a, b in segs):
+                out.append(p)
+        return np.array(out)
+
+    cams = np.array(cams_l + cams_r)
+    sights = [seen(c, left, left_walls) for c in cams_l] + [seen(c, right, right_walls) for c in cams_r]
+    pts = np.vstack([left, right])
+    merged = room_outline.segment_home(cams, sights, pts, wall_pts=None)
+    assert len(merged.rooms) == 1  # what happened before: one room across both
+    home = room_outline.segment_home(cams, sights, pts)
+    assert len(home.rooms) == 2, sorted(r.area_m2 for r in home.rooms)
+    assert len(home.doorways) >= 1

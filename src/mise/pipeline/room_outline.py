@@ -199,7 +199,7 @@ class HomeOutline:
 def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray | None = None, cell: float = 0.05,
                  min_hits: int = 3, core_m: float = 1.0, min_room_m2: float = 1.5, min_edge: float = 0.3,
                  z_band: tuple[float, float] = Z_BAND, pocket_m2: float = 0.45, pocket_mouth_m: float = 1.2,
-                 body_m: float = 1.4) -> HomeOutline:
+                 body_m: float = 1.4, wall_pts: int | str | None = "auto", wall_band: tuple[float, float] = (1.0, 1.9)) -> HomeOutline:
     """Free space -> rooms. Doorways (narrower than core_m) separate rooms; open-plan areas stay one
     room (split those into zones in software). Returns rectilinear outlines and the doorways found.
 
@@ -214,27 +214,55 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
     free = (grid >= min_hits).astype(np.uint8)
     free = cv2.morphologyEx(free, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    if wall_pts and points is not None and len(points):
+        # Cells thick with points between waist and door-top height are wall, whatever the sight
+        # lines say: where two passes over a room disagree by more than a wall's thickness, each
+        # one's lines run past the other's copy of the wall and the rooms on either side merge.
+        # (Below the top of a door, so the wall above a doorway doesn't close it.)
+        w = points[(points[:, 2] > wall_band[0]) & (points[:, 2] < wall_band[1])]
+        ij = np.floor((w[:, :2] - np.asarray(origin)) / cell).astype(int)
+        ok = (ij[:, 0] >= 0) & (ij[:, 1] >= 0) & (ij[:, 0] < free.shape[1]) & (ij[:, 1] < free.shape[0])
+        cnt = np.zeros(free.shape, np.int32)
+        np.add.at(cnt, (ij[ok, 1], ij[ok, 0]), 1)
+        if wall_pts == "auto":  # density varies with the solver: the busiest quarter of the occupied cells
+            wall_pts = max(3, int(np.percentile(cnt[cnt > 0], 75))) if (cnt > 0).any() else 3
+        wall = cv2.dilate((cnt >= wall_pts).astype(np.uint8), np.ones((3, 3), np.uint8))
+        inner = (free & (1 - wall)).astype(np.uint8)
+    else:
+        inner = free
     # room cores: what survives eroding by half a doorway-plus
     r = max(1, int(round(core_m / 2 / cell)))
     disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-    core = cv2.erode(free, disk)
-    n, lab, stats, _ = cv2.connectedComponentsWithStats(core)
-    keep = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] * cell * cell >= 0.25]
+    seeds = []
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(cv2.erode(inner, disk))
+    seeds += [lab == i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] * cell * cell >= 0.25]
+    if inner is not free:
+        # a small room crowded with wall-height things (a bathroom: curtain, mirror, tiles) can lose
+        # its core to the wall cells: keep the cores found without them that no new core overlaps
+        taken = np.any(seeds, axis=0) if seeds else np.zeros(free.shape, bool)
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(cv2.erode(free, disk))
+        seeds += [lab == i for i in range(1, n)
+                  if stats[i, cv2.CC_STAT_AREA] * cell * cell >= 0.25 and not (taken & (lab == i)).any()]
     labels = -np.ones(free.shape, int)
     q = deque()
-    for k, i in enumerate(keep):
-        ys, xs = np.nonzero(lab == i)
+    for k, m in enumerate(seeds):
+        ys, xs = np.nonzero(m)
         labels[ys, xs] = k
         q.extend(zip(ys.tolist(), xs.tolist()))
-    # grow cores over free space (breadth first, so each cell goes to the nearest core)
+    keep = seeds
+    # grow cores over free space (breadth first, so each cell goes to the nearest core): first
+    # within the walls, then over what is left
     H, W = free.shape
-    while q:
-        y, x = q.popleft()
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            yy, xx = y + dy, x + dx
-            if 0 <= yy < H and 0 <= xx < W and free[yy, xx] and labels[yy, xx] < 0:
-                labels[yy, xx] = labels[y, x]
-                q.append((yy, xx))
+    for allowed in ([inner, free] if inner is not free else [free]):
+        if allowed is free and inner is not free:
+            q = deque(zip(*[a.tolist() for a in np.nonzero(labels >= 0)]))
+        while q:
+            y, x = q.popleft()
+            for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                yy, xx = y + dy, x + dx
+                if 0 <= yy < H and 0 <= xx < W and allowed[yy, xx] and labels[yy, xx] < 0:
+                    labels[yy, xx] = labels[y, x]
+                    q.append((yy, xx))
     # closets and nooks: pockets of a room its body doesn't reach, joined by a narrow mouth
     n_main = len(keep)
     small = set()

@@ -148,7 +148,16 @@ print("@@EXIT@@", open("/content/exit_code").read().strip() if os.path.exists("/
             code = int(tail.strip()) if tail.strip() else None
         if code != 0:
             raise RuntimeError(f"reconstruction failed (exit {code}); see the log above")
-        remote(session, 'import subprocess; subprocess.run(["tar", "czf", "/content/out.tgz", "-C", "/content", "out"], check=True)')
+        for attempt in range(3):  # packing can outlast one exec call; the next attempt just packs again
+            try:
+                remote(session, 'import subprocess; subprocess.run(["tar", "czf", "/content/out.tgz", "-C", "/content", '
+                                '"out"], check=True)', timeout=600)
+                break
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                print(f"  (packing attempt {attempt + 1} failed: {str(e).strip().splitlines()[-1][-120:]})", flush=True)
+                if attempt == 2:
+                    raise
+                time.sleep(20)
         got = tmp / "out.tgz"
         colab("download", "-s", session, "/content/out.tgz", str(got), timeout=1800)
         out.mkdir(parents=True, exist_ok=True)
