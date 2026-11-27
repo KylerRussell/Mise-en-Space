@@ -175,7 +175,7 @@ def main(argv=None) -> None:
         sc, Rw, tw = float(wd["scale"]), np.array(wd["R"], float), np.array(wd["t"], float)
         xyz = (sc * xyz.astype(np.float64) @ Rw.T + tw).astype(np.float32)
         for im in images:  # x_cam = Rc x + tc, x = Rw^T (x' - tw) / sc; cameras scaled with the world
-            Rc, tc = im["w2c"][:3, :3], im["w2c"][:3, 3]
+            Rc, tc = im["w2c"][:3, :3].copy(), im["w2c"][:3, 3].copy()  # copies: both are rewritten below
             im["w2c"][:3, :3] = Rc @ Rw.T
             im["w2c"][:3, 3] = sc * tc - Rc @ Rw.T @ tw
     if len(xyz) > a.max_init:

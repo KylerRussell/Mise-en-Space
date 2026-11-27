@@ -90,3 +90,42 @@ def empty_scene(scene_dir: Path, splat_dir: Path, name: str = "empty.ply") -> di
     ply.write_ply(scene_dir / "splats" / name, out)
     rep["path"] = f"splats/{name}"
     return rep
+
+
+def label_gaussians(s: ply.Splat, cameras: list[dict], labels: dict[str, np.ndarray], n_classes: int,
+                    grid: tuple[int, int] = (160, 90), tol: float = 0.06, stride: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """Each Gaussian's class by vote of the frames that see it (CPU).
+
+    Per frame, every center is projected; on a coarse z-buffer only the centers within `tol`
+    (plus 2% of the distance) of the nearest at their cell count as seen, and vote for the
+    label under them. Returns (class per Gaussian, -1 when never seen; votes for it).
+    """
+    X = s.xyz.astype(np.float64)
+    keep_o = 1 / (1 + np.exp(-s.opacity)) > 0.2 if s.opacity is not None else np.ones(len(X), bool)
+    gw, gh = grid
+    votes = np.zeros((len(X), n_classes), np.int32)
+    for cam in cameras[::stride]:
+        m = labels.get(cam["name"])
+        if m is None:
+            continue
+        V, K = np.array(cam["w2c"]), np.array(cam["K"])
+        W, H = cam["size"]
+        pc = X @ V[:3, :3].T + V[:3, 3]
+        z = pc[:, 2]
+        ok = (z > 0.1) & keep_o
+        u = K[0, 0] * pc[:, 0] / np.where(ok, z, 1) + K[0, 2]
+        v = K[1, 1] * pc[:, 1] / np.where(ok, z, 1) + K[1, 2]
+        ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        idx = np.nonzero(ok)[0]
+        gx = (u[idx] * gw / W).astype(int)
+        gy = (v[idx] * gh / H).astype(int)
+        cell = gy * gw + gx
+        zbuf = np.full(gw * gh, np.inf)
+        np.minimum.at(zbuf, cell, z[idx])
+        seen = z[idx] <= zbuf[cell] + tol + 0.02 * zbuf[cell]
+        idx, u_, v_ = idx[seen], u[idx][seen], v[idx][seen]
+        cl = m[(v_ * m.shape[0] / H).astype(int).clip(0, m.shape[0] - 1), (u_ * m.shape[1] / W).astype(int).clip(0, m.shape[1] - 1)]
+        np.add.at(votes, (idx, cl.astype(int)), 1)
+    total = votes.sum(1)
+    cls = np.where(total > 0, votes.argmax(1), -1)
+    return cls, total
