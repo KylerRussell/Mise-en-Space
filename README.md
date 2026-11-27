@@ -164,6 +164,10 @@ It bundle-adjusts the cameras, trains one Gaussian splat per room visit on concu
 sessions (depth from the model as a guide, each camera learning a small correction), and joins
 them room by room. The empty home is the traced layout's walls, floors and ceilings painted from
 the photos where nothing stood in front of them, and filled from around where something did.
+Each room's floor, walls and ceiling are also recorded as materials in the scene (paint and its
+color, wood planks and which way they run, tile, carpet...), with the room's light kept apart, so
+after changing one (`space.finish`, e.g. a new wall color) `mise shell-render my-flat` rebuilds
+the empty home in a second. The things come back as movable objects (`mise scan-objects`).
 The parts: `mise refine-poses`, `run_learned_recon.py NAME --splat SOLVE`, `mise splat-merge`,
 `mise empty-room`.
 

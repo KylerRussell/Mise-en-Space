@@ -50,7 +50,8 @@ def _surfaces(room, cell: float) -> list[dict]:
             if o.wall == w.id and o.kind == "door":
                 inside &= ~((np.abs(S - o.center) < o.width / 2) & (Z >= o.bottom) & (Z <= o.top))
         out.append({"kind": "wall", "xyz": xyz, "normal": np.array([n2[0], n2[1], 0.0]),
-                    "u": np.array([u[0], u[1], 0.0]), "v": np.array([0.0, 0.0, 1.0]), "inside": inside, "id": w.id})
+                    "u": np.array([u[0], u[1], 0.0]), "v": np.array([0.0, 0.0, 1.0]), "inside": inside, "id": w.id,
+                    "space": w.space})
     for sp in room.spaces:
         P = np.array(sp.polygon, float)
         lo, hi = P.min(0), P.max(0)
@@ -62,7 +63,7 @@ def _surfaces(room, cell: float) -> list[dict]:
         for kind, zz, nz in (("floor", 0.002, 1.0), ("ceiling", H - 0.002, -1.0)):
             out.append({"kind": kind, "xyz": np.stack([X, Y, np.full(X.shape, zz)], -1),
                         "normal": np.array([0.0, 0.0, nz]), "u": np.array([1.0, 0.0, 0.0]),
-                        "v": np.array([0.0, nz, 0.0]), "inside": m > 0, "id": f"{sp.id}.{kind}"})
+                        "v": np.array([0.0, nz, 0.0]), "inside": m > 0, "id": f"{sp.id}.{kind}", "space": sp.id})
     return out
 
 
@@ -285,7 +286,7 @@ def to_splat(surfaces: list[dict], cell: float) -> ply.Splat:
 
 def textured_shell(room, frames: dict[str, np.ndarray], cameras: list[dict], labels: dict[str, np.ndarray],
                    classes: list[str], depth: dict[str, np.ndarray] | None = None, cell: float = 0.025,
-                   things: np.ndarray | None = None, say=print) -> tuple[ply.Splat, dict]:
+                   things: np.ndarray | None = None, say=print) -> tuple[ply.Splat, dict, list[dict]]:
     """`things`: points (scene frame) of what is not the shell (a labelled splat's furniture)."""
     surfaces = _surfaces(room, cell)
     say(f"{len(surfaces)} surfaces, {sum(int(s['inside'].sum()) for s in surfaces)} points")
@@ -301,7 +302,7 @@ def textured_shell(room, frames: dict[str, np.ndarray], cameras: list[dict], lab
         hid = sum(int(s.get("hidden", np.zeros(1, bool)).sum()) for s in ss)
         rep[k] = {"m2": round(tot * cell * cell, 1), "seen_pct": round(100 * seen / max(tot, 1), 1),
                   "behind_things_pct": round(100 * hid / max(tot, 1), 1)}
-    return out, rep
+    return out, rep, surfaces
 
 
 SET_IN = frozenset({"mirror", "windowpane", "window", "glass"})  # in the wall's plane: part of it

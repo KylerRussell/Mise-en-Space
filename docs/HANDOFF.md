@@ -253,6 +253,26 @@ point counts as unseen and is filled: floors with the nearest same-size patch of
 then a broad blur; walls with a broad blur of the wall around; ceilings one smooth color.
 Doorways stay open. On the home: walls 59% seen, 28% behind things; floors 54% / 40%.
 
+The shell is then boiled down to materials (`materials.py`), so it can be changed: each room's
+floor, walls and ceiling get a `Surface` in `space.finish` with a `kind` (paint, wood, tile,
+carpet, block, popcorn...), a color, and for wood the boards' direction and width (`direction_deg`,
+`module_m`); a wall that differs goes in `finish.wall_overrides`. The color is the surface's
+robust median over what was seen clean, times one exposure gain for the whole home (phone video
+exposes a white room to mid-grey; the brightest walls and ceilings set it, 1.67 here). The pattern
+is read off a close, square-on view of a clear patch (2.5 mm/px): structure-tensor grain
+direction and repeats; board direction snapped to the room's walls, width kept to 12-25 cm,
+boards 1.2 m long. Rooms whose floors (walls, ceilings) are the same kind and hue share one color
+(the best-seen room's); a surface seen too little borrows (a ceiling from the others, a closet's
+floor from the nearest room). The light is kept apart as shading maps (`finishes/shading.npz`,
+the photo-painted shell over its material's color, blurred 0.3 m), so `splats/empty.ply` =
+material x shading looks as captured, and `mise shell-render SCENE` rebuilds it from the scene
+in about a second after a repaint or a new floor (`--flat` without the light). The photo-painted
+version stays as `splats/empty_photo.ply`. On the home: one laminate floor (wood, boards along
+y, #b6aea3), one wall paint (#c2bdb7; the walk-in's walls warmer), one ceiling. Not detected:
+the walk-in's painted block wall (block courses can't be told from door frames and hangers in
+one patch; set `kind: "block"` by hand, or name materials with an image model later); trim
+(baseboards) isn't modelled.
+
 The things come back as movable objects (`objects.py`, `mise scan-objects`, run by `splat-home`):
 the owner's call (2026-11-27) is that furniture is removed and re-added as separate movable 3D
 objects, so its reconstruction only has to be recognizable; what matters is each one's kind,

@@ -286,6 +286,20 @@ def cmd_splat_home(args):
     print(json.dumps(rep, indent=1, default=float))
 
 
+def cmd_shell_render(args):
+    """The empty home again from the scene's finishes (after a repaint or a new floor)."""
+    from .pipeline import ply
+    from .pipeline.materials import finish_summary, render_shell
+    from .scene.models import Scene
+
+    d = Path(args.data) / args.scene
+    scene = Scene.model_validate_json((d / "scene.json").read_text())
+    out = render_shell(scene, d, lighting=not args.flat)
+    (d / "splats").mkdir(exist_ok=True)
+    ply.write_ply(d / "splats" / args.name, out)
+    print(json.dumps({"path": f"splats/{args.name}", "gaussians": len(out), "finishes": finish_summary(scene)}, indent=1))
+
+
 def cmd_scan_objects(args):
     """The things in a labelled splat as movable objects in the scene (fixtures marked)."""
     from .pipeline.objects import add_scanned_objects
@@ -363,6 +377,10 @@ def main(argv=None):
     a.add_argument("solve"); a.add_argument("frames", help="the picked frames (with intrinsics.json)")
     a.add_argument("out"); a.add_argument("--work", help="scratch folder (default OUT-work)")
     a.set_defaults(fn=cmd_refine_poses)
+    a = sub.add_parser("shell-render", help="the empty home from the scene's finishes (after changing a color or floor)")
+    a.add_argument("scene"); a.add_argument("--name", default="empty.ply")
+    a.add_argument("--flat", action="store_true", help="without the room's light (shading maps)")
+    a.set_defaults(fn=cmd_shell_render)
     a = sub.add_parser("scan-objects", help="the things in a labelled splat as movable objects (after empty-room labels it)")
     a.add_argument("scene"); a.add_argument("splat_dir", help="splat.ply + gauss_labels.npz")
     a.set_defaults(fn=cmd_scan_objects)

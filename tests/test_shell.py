@@ -32,7 +32,7 @@ def test_the_wall_is_painted_from_the_photo_and_what_hid_it_is_filled():
     cams = [{"name": "f.jpg", "w2c": w2c.tolist(), "K": K, "size": [W, H]}]
     xs = np.linspace(1.75, 2.25, 20)
     things = np.array([(x, 2.5, z) for x in xs for z in np.linspace(0.1, 2.0, 30)])
-    out, rep = textured_shell(room, {"f.jpg": img}, cams, {"f.jpg": lab}, ["wall", "cupboard"],
+    out, rep, _ = textured_shell(room, {"f.jpg": img}, cams, {"f.jpg": lab}, ["wall", "cupboard"],
                               {"f.jpg": depth}, cell=0.05, things=things, say=lambda m: None)
     X, rgb = out.xyz, out.rgb()
     on_far = np.abs(X[:, 1] - 3) < 0.02

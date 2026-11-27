@@ -153,12 +153,21 @@ def polygon_area(pts) -> float:
 HEX_COLOR = r"^#[0-9a-fA-F]{6}$"
 
 
+MATERIALS = ("paint", "wood", "tile", "carpet", "block", "popcorn", "stone", "other")
+
+
 class Surface(BaseModel):
-    """How a floor, wall or ceiling looks: a color, optionally a repeating texture image."""
+    """How a floor, wall or ceiling looks: a color, optionally a repeating texture image, and what
+    it is made of (so it can be changed: repaint the walls, lay a different floor)."""
 
     color: str | None = Field(None, pattern=HEX_COLOR, description="average color, #rrggbb")
     texture: str | None = Field(None, description="image under the scene's folder, e.g. finishes/floor.jpg")
     size_m: float = Field(1.0, gt=0, description="the texture image covers size_m x size_m of surface")
+    kind: Literal["paint", "wood", "tile", "carpet", "block", "popcorn", "stone", "other"] | None = Field(
+        None, description="material: paint (flat color), wood (planks), tile, carpet, block (painted masonry), ...")
+    direction_deg: float | None = Field(
+        None, description="planks/rows run this way: degrees CCW from +x on floors, from horizontal on walls")
+    module_m: float | None = Field(None, gt=0, description="plank width, tile size or block course height")
 
     @field_validator("texture")
     @classmethod
@@ -172,6 +181,8 @@ class Finish(BaseModel):
     floor: Surface | None = None
     walls: Surface | None = None
     ceiling: Surface | None = None
+    wall_overrides: dict[str, Surface] = Field(
+        default_factory=dict, description="walls (by wall id) that differ from `walls`: an accent wall, block")
 
 
 class Space(BaseModel):

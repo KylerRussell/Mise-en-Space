@@ -321,9 +321,15 @@ def empty_scene(scene_dir: Path, splat_dir: Path, name: str = "empty.ply", seman
                                        cv2.COLOR_BGR2RGB).astype(np.float32) / 255
         dz = np.load(depth)
         dmaps = {str(n): dz["depth"][i].astype(np.float32) * depth_scale for i, n in enumerate(dz["names"])}
-        out, rep = textured_shell(scene.room, imgs, list(by.values()), labels, classes, dmaps,
-                                  things=thing_points(s, cls, classes), say=say)
-        rep = {"kind": "shell", **rep, "gaussians": len(out)}
+        from .materials import estimate, finish_summary, render_shell
+
+        photo, rep, surfaces = textured_shell(scene.room, imgs, list(by.values()), labels, classes, dmaps,
+                                              things=thing_points(s, cls, classes), say=say)
+        ply.write_ply(scene_dir / "splats" / "empty_photo.ply", photo)  # as painted from the photos, to compare
+        # what each surface is (paint, wood, block...) and its color; the empty home made from that
+        estimate(scene, surfaces, 0.025, list(by.values()), fd, labels, classes, dmaps, scene_dir, say=say)
+        out = render_shell(scene, scene_dir)
+        rep = {"kind": "shell", **rep, "finishes": finish_summary(scene), "gaussians": len(out)}
     else:
         rooms = [np.array(sp.polygon, float) for sp in scene.room.spaces]
         ceilings = [sp.ceiling_height or scene.room.ceiling_height for sp in scene.room.spaces]
