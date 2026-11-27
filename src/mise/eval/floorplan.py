@@ -247,13 +247,17 @@ def score(path: Path, plan: dict, room: str, scene: Path | None = None, box: dic
     if not recs:
         return {"error": "no solve"}
     metric = bool(meta.get("metric"))
+    given = None  # a scan work folder: the scale the scan used, so its scene's rooms line up
+    if (Path(path) / "result.json").exists():
+        pieces = json.loads((Path(path) / "result.json").read_text()).get("pieces") or []
+        given = next((pc.get("scale") for pc in pieces if pc.get("scale")), None)
     # as the pipeline does: the largest piece that levels and keeps the cameras at hand height
     rec = L = None
     for r in recs:
         if r.num_reg_images() < 10:
             break
         try:
-            Lr, how = _scale_and_level(r, ScanOptions(scene_id="eval", scale=1.0 if metric else None))
+            Lr, how = _scale_and_level(r, ScanOptions(scene_id="eval", scale=given or (1.0 if metric else None)))
         except Exception:  # noqa: BLE001 - no floor found: not a usable piece
             continue
         if Lr.pose_sanity()["ok"]:

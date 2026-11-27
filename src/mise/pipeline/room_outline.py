@@ -12,7 +12,7 @@ Input is metric and leveled (floor z = 0, walls along x/y), e.g. after
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -359,6 +359,18 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
         if d.width >= 0.4 and (d.rooms not in best or d.width > best[d.rooms].width):
             best[d.rooms] = d
     doorways = list(best.values())
+    # what nobody walked into and nothing opens onto is not a room: a mirror's reflection, or
+    # space seen through a window
+    has_door = {i for d in doorways for i in d.rooms}
+    gone = {i for i, r in enumerate(rooms)
+            if i not in has_door and not any(_inside(np.array(r.polygon), c[:2]) for c in np.asarray(cams))}
+    if gone and len(gone) < len(rooms):
+        renum = {i: j for j, i in enumerate(i for i in range(len(rooms)) if i not in gone)}
+        for k, i in index.items():
+            if i in gone:
+                labels[labels == k] = -1
+        rooms = [r for i, r in enumerate(rooms) if i not in gone]
+        doorways = [replace(d, rooms=(renum[d.rooms[0]], renum[d.rooms[1]])) for d in doorways]
     return HomeOutline(rooms=rooms, doorways=doorways, labels=labels, origin=origin, cell=cell)
 
 
@@ -449,7 +461,7 @@ def push_furniture_edges(rooms: list[Outline], points: np.ndarray, low: tuple[fl
 
 def snap_edges_to_walls(rooms: list[Outline], cams: np.ndarray, sights: list[np.ndarray], band: tuple[float, float] = (1.3, 2.3),
                         reach: float = 0.6, min_move: float = 0.05, min_pts: int = 40,
-                        bin_m: float = 0.02) -> tuple[list[EdgeFix], set[tuple[int, int]]]:
+                        bin_m: float = 0.02, outer: float = 0.4) -> tuple[list[EdgeFix], set[tuple[int, int]]]:
     """Move each wall to where the points seen from inside its room say it is (in place).
 
     Free space stops short of walls by however far the points scatter, and at furniture the
@@ -489,7 +501,10 @@ def snap_edges_to_walls(rooms: list[Outline], cams: np.ndarray, sights: list[np.
             edges = np.arange(-reach, reach + bin_m, bin_m)
             h, _ = np.histogram(dd, edges)
             h = np.convolve(h, [1, 2, 3, 2, 1], mode="same")
-            peak = edges[int(h.argmax())] + bin_m / 2
+            # the wall is the outermost solid layer: shelves, hanging clothes and furniture
+            # stand in front of it, and can be the denser layer
+            pk = [i for i in range(1, len(h) - 1) if h[i] >= h[i - 1] and h[i] >= h[i + 1] and h[i] >= outer * h.max()]
+            peak = edges[max(pk) if pk else int(h.argmax())] + bin_m / 2
             near = np.abs(dd - peak) < 0.06
             if near.sum() < max(min_pts // 2, 0.2 * len(dd)):
                 continue  # no clear wall layer

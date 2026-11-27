@@ -179,19 +179,23 @@ metres (+-4%), the doorway heads (2.06 m openings, +-2% from the median of 3-5 d
 box (+-5-9%). On four joined homes it landed within -1.1..+0.7% of the plan (the model alone:
 -1.3..+3.2%). Ceiling height is no use (2.37-2.76 m across solves of the same rooms).
 
-The automatic run with both (data/scans/home-v3): joins 2.9 and 2.5 cm, scale x1.034 (the plan
-asks x1.032), walls 5.6 cm off the plan. IoU: main 0.93, bathroom 0.90, bedroom 0.89, walk-in
-0.65, bedroom closet 0.35, entry closet missed. The main room's 4.88 m span still reads -6%
-(+5.5% in another run): that corner of the main room is the least stable part of the solve.
+The automatic run with both (data/scans/home-v3, layout rebuilt as home-v3b): joins 2.9 and
+2.5 cm, scale x1.034 (the plan asks x1.032; the scene needs x0.999), walls 5.5 cm off the plan.
+Spans of the main room +1.2/+1.8/+1.4%, bedroom -0.7/+2.1%. IoU: main 0.96, bedroom 0.96,
+bathroom 0.91, walk-in 0.90, bedroom closet 0.34, entry closet missed. The main room's 4.88 m
+span still reads -6% (+5.5% in another run): that corner is the least stable part of the solve.
+Layout fixes that got there: a closet's wall is the outermost solid layer of points (hanging
+clothes in front are denser), and a space no camera stood in and no doorway opens onto is
+dropped (the bathroom mirror's reflection). The scorer now scores a scan folder at the scale
+the scan used (it had used the camera-height guess, so the scene's IoUs were off).
 
 The straightening pass (`room_outline.regularize_walls`: shared walls one thickness apart,
 wall lines shared) moves IoUs by <=0.02; squaring rooms onto one grid (`--square`) gains nothing.
 
 ## Next steps
 
-1. Stage 1 loose ends: closets (walk-in 0.65, bedroom closet 0.35, entry closet missed); the
-   main room's 4.88 m span (+-6%); a phantom space behind the bathroom mirror; doorway widths
-   0.7 m for ~0.8 m.
+1. Stage 1 loose ends: the closets peeked into from outside (bedroom closet 0.34, entry closet
+   missed); the main room's 4.88 m span (+-6%); doorway widths 0.7 m for ~0.8 m.
 2. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
 3. Stage 2: splats and the empty room on a Colab GPU, from the joined solve.
 4. Rebuild the bedroom, closets and bathroom of `my-apartment` from the learned home.

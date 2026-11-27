@@ -219,3 +219,21 @@ def test_rooms_settle_into_one_plan():
     rx = min(x for x, _ in right.polygon)
     assert abs((rx - lx) - 0.12) < 1e-6 and abs((rx + lx) / 2 - 3.0) < 1e-6
     assert abs(max(y for _, y in left.polygon) - max(y for _, y in right.polygon)) < 1e-6
+
+
+def test_a_closet_wall_is_behind_the_clothes():
+    """Hanging clothes 0.45 m in front of a closet's back wall make the denser layer; the wall
+    is the outermost solid one."""
+    from mise.pipeline.room_outline import Outline, snap_edges_to_walls
+
+    rng = np.random.default_rng(3)
+    room = Outline(polygon=[(0, 0), (2, 0), (2, 1.5), (0, 1.5)], area_m2=3.0, ceiling_m=None,
+                   free=np.zeros((1, 1)), origin=(0, 0), cell=0.05)
+
+    def layer(y, n):  # points across the room's width at y, 1.35-2.25 m up
+        return np.c_[rng.uniform(0.2, 1.8, n), rng.normal(y, 0.01, n), rng.uniform(1.35, 2.25, n)]
+    pts = np.vstack([layer(1.95, 400), layer(1.5, 900), layer(-0.02, 600)])  # wall behind, clothes, south wall
+    cams = np.array([(0.6, 0.7, 1.5), (1.0, 0.8, 1.5), (1.4, 0.6, 1.5)])
+    snap_edges_to_walls([room], cams, [pts] * 3)
+    assert abs(max(y for _, y in room.polygon) - 1.95) < 0.03
+
