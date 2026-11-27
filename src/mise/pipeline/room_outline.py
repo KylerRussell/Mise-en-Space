@@ -359,18 +359,32 @@ def segment_home(cams: np.ndarray, sights: list[np.ndarray], points: np.ndarray 
         if d.width >= 0.4 and (d.rooms not in best or d.width > best[d.rooms].width):
             best[d.rooms] = d
     doorways = list(best.values())
-    # what nobody walked into and nothing opens onto is not a room: a mirror's reflection, or
-    # space seen through a window
+    # what nobody walked into and either nothing opens onto or shows no floor is not a room: a
+    # mirror's reflection, or space seen through a window. (A closet peeked into from its door
+    # shows some floor; the space in a mirror over a vanity shows none, as seen from the room.)
     has_door = {i for d in doorways for i in d.rooms}
-    gone = {i for i, r in enumerate(rooms)
-            if i not in has_door and not any(_inside(np.array(r.polygon), c[:2]) for c in np.asarray(cams))}
+    cams_a = np.asarray(cams)
+    walked = {i for i, r in enumerate(rooms) if any(_inside(np.array(r.polygon), c[:2]) for c in cams_a)}
+    floor_d = {}
+    if points is not None and len(points):
+        fp = np.asarray(points)[np.abs(np.asarray(points)[:, 2]) < 0.1]
+        fp = fp[:: max(1, len(fp) // 50000)]
+        for i, r in enumerate(rooms):
+            poly = np.array(r.polygon)
+            lo, hi = poly.min(0), poly.max(0)
+            q = fp[(fp[:, 0] > lo[0]) & (fp[:, 0] < hi[0]) & (fp[:, 1] > lo[1]) & (fp[:, 1] < hi[1])]
+            floor_d[i] = sum(_inside(poly, x[:2]) for x in q) / max(r.area_m2, 1e-6)
+    ref = np.median([floor_d[i] for i in walked if i in floor_d]) if walked and floor_d else 0.0
+    gone = {i for i in range(len(rooms)) if i not in walked
+            and (i not in has_door or (ref > 0 and floor_d.get(i, ref) < 0.01 * ref))}
     if gone and len(gone) < len(rooms):
         renum = {i: j for j, i in enumerate(i for i in range(len(rooms)) if i not in gone)}
         for k, i in index.items():
             if i in gone:
                 labels[labels == k] = -1
         rooms = [r for i, r in enumerate(rooms) if i not in gone]
-        doorways = [replace(d, rooms=(renum[d.rooms[0]], renum[d.rooms[1]])) for d in doorways]
+        doorways = [replace(d, rooms=(renum[d.rooms[0]], renum[d.rooms[1]])) for d in doorways
+                    if not set(d.rooms) & gone]
     return HomeOutline(rooms=rooms, doorways=doorways, labels=labels, origin=origin, cell=cell)
 
 
@@ -461,7 +475,8 @@ def push_furniture_edges(rooms: list[Outline], points: np.ndarray, low: tuple[fl
 
 def snap_edges_to_walls(rooms: list[Outline], cams: np.ndarray, sights: list[np.ndarray], band: tuple[float, float] = (1.3, 2.3),
                         reach: float = 0.6, min_move: float = 0.05, min_pts: int = 40,
-                        bin_m: float = 0.02, outer: float = 0.4) -> tuple[list[EdgeFix], set[tuple[int, int]]]:
+                        bin_m: float = 0.02, outer: float = 0.4,
+                        skip: set[tuple[int, int]] = frozenset()) -> tuple[list[EdgeFix], set[tuple[int, int]]]:
     """Move each wall to where the points seen from inside its room say it is (in place).
 
     Free space stops short of walls by however far the points scatter, and at furniture the
@@ -485,6 +500,8 @@ def snap_edges_to_walls(rooms: list[Outline], cams: np.ndarray, sights: list[np.
         P = P[(P[:, 2] > band[0]) & (P[:, 2] < band[1])]
         moves = []
         for i in range(n):
+            if (ri, i) in skip:
+                continue
             a, b = poly[i], poly[(i + 1) % n]
             e = b - a
             L = float(np.linalg.norm(e))

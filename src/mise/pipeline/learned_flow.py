@@ -43,10 +43,12 @@ def pick_frames(video: Path, frames_dir: Path, fps: float = 3.0) -> list[dict]:
 
 
 def colab_job(name: str, frames_dir: Path, out: Path, log: Path, model: str, gpu: str,
-              t0: float | None = None, t1: float | None = None, chunk: int = 900, wait_min: float = 240) -> subprocess.Popen:
+              t0: float | None = None, t1: float | None = None, chunk: int = 900, wait_min: float = 240,
+              extra: list[str] | None = None) -> subprocess.Popen:
     """Start one run_learned_recon.py run (it stops its VM when done or failing)."""
-    args = [sys.executable, str(LAUNCHER), name, "--frames", str(frames_dir), "--out", str(out), "--model", model,
-            "--gpu", gpu, "--wait", str(wait_min), "--chunk", str(chunk)]
+    args = [sys.executable, str(LAUNCHER), name, "--frames", str(frames_dir), "--out", str(out), "--gpu", gpu,
+            "--wait", str(wait_min)]
+    args += extra if extra else ["--model", model, "--chunk", str(chunk)]
     args += [f"--t0={t0}"] if t0 is not None else []
     args += [f"--t1={t1}"] if t1 is not None else []
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -59,6 +61,9 @@ def _finish(jobs: dict[str, tuple[subprocess.Popen, Path, Path]], say) -> None:
             if p.poll() is None:
                 continue
             del jobs[name]
+            if (p.returncode != 0 or not (out / "meta.json").exists()) and name == "semantic":
+                say(f"frame labels failed (log {log}); the layout goes on without them")
+                continue
             if p.returncode != 0 or not (out / "meta.json").exists():
                 tail = log.read_text()[-1500:] if log.exists() else ""
                 raise RuntimeError(f"{name} failed (exit {p.returncode}); log {log}:\n{tail}")
@@ -107,6 +112,10 @@ def solve_home(video: Path, work: Path, tag: str, model: str = "da3_nested", gpu
     (learned / "windows.json").write_text(json.dumps(windows))
     t_end = float(times.max())
     jobs, runs = {}, []
+    sem = learned / "semantic"  # what every pixel is (wall, bed, mirror...), for the layout and the empty room
+    if not (sem / "labels.npz").exists():
+        jobs["semantic"] = (colab_job(f"{tag}-seg", frames_dir, sem, learned / "semantic.log", model, "L4," + gpu,
+                                      extra=["--segment"]), sem, learned / "semantic.log")
     for i, (a, b) in enumerate(windows):
         runs.append([])
         for v, (va, vb) in enumerate(variant_bounds(a, b, max(1, variants), t_end)):
@@ -120,7 +129,7 @@ def solve_home(video: Path, work: Path, tag: str, model: str = "da3_nested", gpu
             jobs[key] = (colab_job(f"{tag}-{key}", frames_dir, out, learned / f"{key}.log", model, g, va, vb, chunk=900),
                          out, learned / f"{key}.log")
     if jobs:
-        say(f"solving {len(jobs)} runs at once ({len(windows)} windows x {max(1, variants)})")
+        say(f"{len(jobs)} Colab runs at once ({len(windows)} windows x {max(1, variants)}, and the frame labels)")
         _finish(jobs, say)
     outs, picks = [], []
     for i, rs in enumerate(runs):

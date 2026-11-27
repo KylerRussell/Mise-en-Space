@@ -10,6 +10,13 @@
 
 Then: mise scan VIDEO --scene ID --poses data/scans/learned/NAME --frames FRAMES
 
+With --splat SOLVE it trains a Gaussian splat instead (splat_train.py) on the frames of that solve
+(a learned_recon / join-poses folder) and fetches splat.ply + meta.json, by default to
+data/scans/splats/NAME:
+
+    python scripts/colab/run_learned_recon.py home-v3 --splat data/scans/home-v3/learned-run/learned/home \
+        --frames data/scans/home-v3/learned-run/picked --gpu G4,H100,A100 --steps 30000
+
 Session state goes to its own file (~/.config/colab-cli/mise-sessions.json) and sessions are
 named mise-NAME, so runs never touch sessions other work on this account has open. Several
 runs can go at once (different NAMEs): the account allows concurrent GPU sessions, each one
@@ -57,12 +64,20 @@ def main(argv=None) -> None:
                     help="GPUs to try in order until one is free (T4, L4, G4, A100, H100)")
     ap.add_argument("--wait", type=float, default=60, help="minutes to keep trying for a free GPU")
     ap.add_argument("--keep", action="store_true", help="leave the VM running afterwards")
-    ap.add_argument("--out", type=Path, help="default: data/scans/learned/NAME")
-    a, extra = ap.parse_known_args(argv)  # anything else goes to learned_recon.py (--chunk, --limit, ...)
+    ap.add_argument("--out", type=Path, help="default: data/scans/learned/NAME (data/scans/splats/NAME with --splat)")
+    ap.add_argument("--splat", type=Path, help="train a splat on this solve's frames instead (splat_train.py)")
+    ap.add_argument("--segment", action="store_true", help="label the frames' pixels instead (segment_frames.py)")
+    ap.add_argument("--scene-from", type=Path, help="with --splat: a scan's result.json; train in that scene's frame")
+    a, extra = ap.parse_known_args(argv)  # anything else goes to the remote script (--chunk, --steps, ...)
     session = f"mise-{a.name}"
-    out = a.out or Path("data/scans/learned") / a.name
+    kind = "splats" if a.splat else "semantic" if a.segment else "learned"
+    out = a.out or Path("data/scans") / kind / a.name
+    script = {"splats": "splat_train.py", "semantic": "segment_frames.py", "learned": "learned_recon.py"}[kind]
 
     kept = json.loads((a.frames / "frames.json").read_text())
+    if a.splat:  # the frames the solve has
+        names = {k["name"] for k in json.loads((a.splat / "frames.json").read_text())}
+        kept = [k for k in kept if k["name"] in names]
     sel = [k for k in kept if (a.t0 is None or k["t"] >= a.t0) and (a.t1 is None or k["t"] <= a.t1)]
     print(f"{len(sel)} frames in the stretch; packing", flush=True)
     tmp = Path(tempfile.mkdtemp(prefix="mise-colab-"))
@@ -76,11 +91,22 @@ def main(argv=None) -> None:
         tar.addfile(info, io.BytesIO(data))
         if (a.frames / "intrinsics.json").exists():  # the camera's calibration travels with its frames
             tar.add(a.frames / "intrinsics.json", "in/intrinsics.json")
+        if a.splat:
+            for f in ("cameras.txt", "images.txt", "points3D.txt"):
+                tar.add(a.splat / "sparse" / "0" / f, f"in/solve/sparse/0/{f}")
 
-    args = ["--frames", "/content/in", "--out", "/content/out", "--model", a.model]
-    args += [f"--t0={a.t0}"] if a.t0 is not None else []
-    args += [f"--t1={a.t1}"] if a.t1 is not None else []
-    args += extra
+    if a.segment:
+        args = ["--frames", "/content/in", "--out", "/content/out", *extra]
+    elif a.splat:
+        args = ["--frames", "/content/in", "--solve", "/content/in/solve", "--out", "/content/out", *extra]
+        if a.scene_from:
+            ref = next(pc for pc in json.loads(a.scene_from.read_text())["pieces"] if pc.get("scene_from_solve"))
+            args += ["--world", json.dumps(ref["scene_from_solve"])]
+    else:
+        args = ["--frames", "/content/in", "--out", "/content/out", "--model", a.model]
+        args += [f"--t0={a.t0}"] if a.t0 is not None else []
+        args += [f"--t1={a.t1}"] if a.t1 is not None else []
+        args += extra
     started = time.time()
     deadline, got_gpu = time.time() + 60 * a.wait, None
     while got_gpu is None:
@@ -100,14 +126,14 @@ def main(argv=None) -> None:
             time.sleep(120)
     try:
         colab("upload", "-s", session, str(pack), "/content/in.tgz", timeout=1800)
-        colab("upload", "-s", session, str(HERE / "learned_recon.py"), "/content/learned_recon.py", timeout=300)
+        colab("upload", "-s", session, str(HERE / script), f"/content/{script}", timeout=300)
         start = f"""
 import os, subprocess, shlex, sys
 if os.path.exists("/content/run.sh"):  # an earlier attempt got this far: don't start a second job
     print("already started")
 else:
     subprocess.run(["tar", "xzf", "/content/in.tgz", "-C", "/content"], check=True)
-    cmd = [sys.executable, "-u", "/content/learned_recon.py", *{args!r}]
+    cmd = [sys.executable, "-u", "/content/{script}", *{args!r}]
     open("/content/run.sh.tmp", "w").write(shlex.join(cmd) + " > /content/recon.log 2>&1; echo $? > /content/exit_code\\n")
     os.rename("/content/run.sh.tmp", "/content/run.sh")
     subprocess.Popen(["bash", "/content/run.sh"], start_new_session=True)
@@ -142,7 +168,7 @@ print("@@EXIT@@", open("/content/exit_code").read().strip() if os.path.exists("/
             log, _, tail = text.rpartition("@@EXIT@@")
             lines = log.rstrip("\n").splitlines()
             for line in lines[seen:]:
-                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line or 'File "' in line:
+                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line or "[splat]" in line or "[seg]" in line or 'File "' in line:
                     print("  " + line[-300:], flush=True)
             seen = len(lines)
             code = int(tail.strip()) if tail.strip() else None

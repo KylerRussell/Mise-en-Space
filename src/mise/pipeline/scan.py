@@ -53,6 +53,7 @@ class ScanOptions:
     t0: float | None = None  # only this stretch of the video (seconds)
     t1: float | None = None
     resume: bool = False  # reuse the frames and solve already in the work folder
+    semantic: Path | None = None  # per-frame class labels (segment_frames.py): walls from structure only
 
 
 class Cancelled(Exception):
@@ -337,6 +338,8 @@ def _place(recs: list, times: dict[str, float], opts: ScanOptions, ev: ScanEvent
             p["status"] = "reference"
             p["scale_from"] = how
             p["scale"] = round(Lp.scale, 5)
+            # scene = scale * R @ solve + t: what a splat trained on this solve's poses needs
+            p["scene_from_solve"] = {"scale": float(Lp.scale), "R": np.asarray(Lp.R).tolist(), "t": np.asarray(Lp.t).tolist()}
             continue
         try:
             Lp, rep = sfm_scene.align_by_time(recs[ref["id"]], L, times, recs[p["id"]], times)
@@ -539,9 +542,32 @@ def run_scan(video: Path, work: Path, opts: ScanOptions, store=None, ev: ScanEve
         current = "layout"
         ev.stage("layout", "running")
         cams, sights, points, names = _merge(L, pieces)
-        home = room_outline.segment_home(cams, sights, points, walk=cams[np.argsort(names)])  # names sort in time
+        wall_points, wall_cams, wall_sights = points, cams, sights
+        joined = [p for p in pieces if p.get("leveled") is not None]
+        if opts.semantic and not joined:
+            # what each point is (wall, bed, mirror...): free space is carved by every sight line but
+            # those through mirrors and windows, and walls are placed from the home's shell only
+            from . import sfm_scene, structure
+
+            labels, classes = structure.load_labels(Path(opts.semantic))
+            labels = structure.fill_see_through(labels, classes)
+            rr = recs[ref["id"]]
+            carve, rc = structure.structure_only(rr, labels, classes, keep=None, drop=structure.SEE_THROUGH)
+            shell, rs = structure.structure_only(rr, labels, classes)
+            Lc = sfm_scene._leveled(carve, L.R, L.t, L.scale, L.yaw_deg)
+            Ls = sfm_scene._leveled(shell, L.R, L.t, L.scale, L.yaw_deg)
+            cams, sights, names = Lc.cams, Lc.sights, Lc.image_names
+            wall_points, wall_cams, wall_sights = Ls.points, Ls.cams, Ls.sights
+            ev.emit("progress", stage="layout", message=f"{rc['dropped']} points seen through mirrors and windows set "
+                    f"aside; walls from {len(Ls.points)} of {rs['points']} points (wall, floor, ceiling, doors)")
+        elif opts.semantic:
+            ev.emit("progress", stage="layout", message="frame labels not used: the home is in several pieces")
+        home = room_outline.segment_home(cams, sights, wall_points, walk=cams[np.argsort(names)])  # names sort in time
         # walls where the points above furniture height put them; the furniture test only where those are too few
-        snapped, placed = room_outline.snap_edges_to_walls(home.rooms, cams, sights)
+        snapped, placed = room_outline.snap_edges_to_walls(home.rooms, wall_cams, wall_sights)
+        if wall_sights is not sights:  # where the shell is hidden (a closet full of clothes): every point, outermost layer
+            more, placed2 = room_outline.snap_edges_to_walls(home.rooms, cams, sights, skip=placed)
+            snapped, placed = snapped + more, placed | placed2
         ev.emit("progress", stage="layout", message=f"{len(placed)} walls found on their points, {len(snapped)} moved")
         fixes = room_outline.push_furniture_edges(home.rooms, points, skip=placed)
         room_outline.settle_closets(home.rooms)

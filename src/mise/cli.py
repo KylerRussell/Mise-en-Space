@@ -184,7 +184,7 @@ def cmd_scan(args):
     (work / "job.json").write_text(json.dumps({"id": f"cli_{work.name}"[:64], "scene_id": args.scene, "name": args.name,
                                                "created": time.time()}))
     opts = ScanOptions(scene_id=args.scene, name=args.name, fps=args.fps, scale=args.scale, t0=args.t0, t1=args.t1,
-                       resume=args.resume)
+                       resume=args.resume, semantic=Path(args.semantic) if getattr(args, "semantic", None) else None)
     if args.poses:  # a solve made elsewhere (scripts/colab/learned_recon.py): import it, then carry on as --resume
         from .pipeline.scan import import_poses
 
@@ -216,8 +216,26 @@ def cmd_learned_scan(args):
             f"{k} x{v['factor']} +-{v['sigma_pct']}%" for k, v in rep["from"].items()))
         args.scale = rep["factor"]
     args.poses, args.frames, args.work = str(home), str(work / "learned-run" / "picked"), str(work)
+    sem = work / "learned-run" / "learned" / "semantic"
+    args.semantic = str(sem) if (sem / "labels.npz").exists() else None
     args.resume, args.t0, args.t1 = False, None, None
     cmd_scan(args)
+
+
+def cmd_splat_attach(args):
+    """Copy a splat (already in the scene's frame) into the scene and make it the room's splat."""
+    import shutil
+
+    from .scene.models import Scene
+
+    d = Path(args.data) / args.scene
+    scene = Scene.model_validate_json((d / "scene.json").read_text())
+    rel = Path("splats") / (args.name or Path(args.splat).name)
+    (d / rel).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(args.splat, d / rel)
+    scene.room.splat = rel.as_posix()
+    (d / "scene.json").write_text(scene.model_dump_json(indent=2))
+    print(f"{args.scene}: room splat {rel} ({(d / rel).stat().st_size / 1e6:.0f} MB)")
 
 
 def cmd_join_poses(args):
@@ -255,6 +273,9 @@ def main(argv=None):
     a.add_argument("--out", default="scale_report.json"); a.set_defaults(fn=cmd_scale_report)
     a = sub.add_parser("normalize"); a.add_argument("input"); a.add_argument("output"); a.add_argument("--scale", type=float, default=1.0)
     a.add_argument("--scale-report"); a.add_argument("--up", type=float, nargs=3, default=[0, 0, 1], help="rough up direction in the input frame"); a.set_defaults(fn=cmd_normalize)
+    a = sub.add_parser("splat-attach", help="make a trained splat (in the scene's frame) the scene's room splat")
+    a.add_argument("scene"); a.add_argument("splat"); a.add_argument("--name", help="file name in the scene's splats/")
+    a.set_defaults(fn=cmd_splat_attach)
     a = sub.add_parser("package"); a.add_argument("splat"); a.add_argument("labels", help="labels.npy, one int per Gaussian")
     a.add_argument("out"); a.add_argument("--names", help="JSON {label: {id, name, category}}"); a.add_argument("--openings", help="JSON list of openings")
     a.add_argument("--background", type=int, nargs="*", default=[0]); a.add_argument("--ceiling", type=float, default=2.5)
@@ -270,6 +291,8 @@ def main(argv=None):
     a.add_argument("--poses", help="use this camera solve instead of solving: a folder from scripts/colab/learned_recon.py "
                    "(frames.json, sparse/0, meta.json)")
     a.add_argument("--frames", help="with --poses: folder holding the frames it names (default: POSES/frames)")
+    a.add_argument("--semantic", help="per-frame class labels (labels.npz + meta.json from segment_frames.py): walls "
+                   "from wall/floor/ceiling/door points only, nothing carved through mirrors and windows")
     a.set_defaults(fn=cmd_scan)
 
     a = sub.add_parser("learned-scan", help="video -> scene, cameras solved by a learned model on Colab, room by room")

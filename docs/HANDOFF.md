@@ -192,12 +192,46 @@ the scan used (it had used the camera-height guess, so the scene's IoUs were off
 The straightening pass (`room_outline.regularize_walls`: shared walls one thickness apart,
 wall lines shared) moves IoUs by <=0.02; squaring rooms onto one grid (`--square`) gains nothing.
 
+## Layout from the home's shell, not its contents (done 2026-11-27)
+
+Clothes, beds, shelves and mirrors were behind most of the layout errors. Every picked frame is
+now labelled per pixel (`scripts/colab/segment_frames.py`: Mask2Former Swin-L, ADE20K, MIT
+licence; 877 frames in a minute on an L4; `run_learned_recon.py NAME --segment`), and each
+point of a learned solve takes its pixel's class (`pipeline/structure.py`). With
+`mise scan --semantic DIR` (learned-scan runs the labelling alongside the windows):
+- free space is carved by every sight line except those through mirrors, windows and screens
+  (`SEE_THROUGH`; each mirror's labelled patches are filled to their hull, as what shows in a
+  mirror is labelled as what it reflects);
+- walls come from wall/floor/ceiling/door points only (`STRUCTURE`), falling back to every point
+  (outermost layer) where the shell is hidden, as in a closet full of clothes.
+A space no camera stood in that shows almost no floor (under 1% of the walked rooms' floor
+points per m2) is dropped: the bathroom mirror's reflection over the vanity showed none, a
+closet peeked into shows some. Carving only from structure points was worse: a sight line to a
+shirt still proves the space in front of it is empty.
+
+First tour, automatic solve with labels (data/scans/home-v3c): main 0.96, bedroom 0.96,
+bathroom 0.91, walk-in 0.89, bedroom closet 0.33 (mirrored doors; on solve dc4 the mirror's
+reflection happened to carve the closet and scored 0.63), entry closet missed; 5 rooms,
+4 doorways, no phantom; scene scale x0.999 of the plan, walls 5.5 cm off.
+
+## Stage 2: splats (started 2026-11-27)
+
+`scripts/colab/splat_train.py` (gsplat, plain 3DGS with its default densification) trains on the
+picked frames and a solve: `run_learned_recon.py NAME --splat SOLVE --frames PICKED
+--scene-from SCAN/result.json` trains in the scene's frame (the scan records
+`scene_from_solve`), so `mise splat-attach SCENE splat.ply` just copies it in. 30k steps over
+the whole tour take ~10 min on an A100. Depth Anything 3's cameras are a few cm / ~1 deg off,
+which blurred the first home splat (held-out PSNR 16; 26 on a 40 s stretch), so each camera
+now learns a small correction during training, and held-out cameras are aligned to the
+finished splat before scoring. Bundle adjustment on SIFT from the model's poses (CPU) was tried
+and dropped: on the plain bedroom it moved cameras 17 cm / 6 deg, more than the model's error.
+
 ## Next steps
 
 1. Stage 1 loose ends: the closets peeked into from outside (bedroom closet 0.34, entry closet
    missed); the main room's 4.88 m span (+-6%); doorway widths 0.7 m for ~0.8 m.
 2. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
-3. Stage 2: splats and the empty room on a Colab GPU, from the joined solve.
+3. Stage 2: the empty room: Gaussians on things (from the frame labels) out, floor and walls filled.
 4. Rebuild the bedroom, closets and bathroom of `my-apartment` from the learned home.
 
 ## Smaller open items
