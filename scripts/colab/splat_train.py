@@ -11,13 +11,18 @@ every frame but a held-out eighth, whose PSNR is reported (meta.json). A learned
 cameras are good to a few cm and about a degree, which blurs a splat, so each camera also
 learns a small rotation and offset (--pose-opt, on by default); before the held-out frames are
 scored their cameras get the same alignment against the finished splat (test-time pose
-alignment), so the score measures the splat, not the model's pose error. The splat stays in the
+alignment), so the score measures the splat, not the model's pose error. A phone's exposure
+and white balance drift from room to room: each frame also learns a color correction (a 3x3
+matrix and offset on the rendered color, --color-opt), aligned the same way for held-out frames. The splat stays in the
 solve's frame unless --world gives the scene's (scene = scale * R @ solve + t, from the scan's
 result.json): then cameras and seeds are moved first, so the splat comes out in the scene's
 frame with its colors' view dependence intact.
 
-Output: out/splat.ply (standard 3DGS layout: xyz, f_dc, f_rest, opacity, scale, rot) and
-out/meta.json (steps, Gaussians, held-out PSNR, seconds).
+Output: out/splat.ply (standard 3DGS layout: xyz, f_dc, f_rest, opacity, scale, rot),
+out/cameras.json (the refined cameras), out/meta.json (steps, Gaussians, held-out PSNR, seconds)
+and, given --labels (segment_frames.py output), out/gauss_labels.npz: each Gaussian's class by
+vote of the frames that see it (its center projects onto a pixel whose rendered depth is the
+Gaussian's own, so walls don't take the label of the bed in front of them): cls, share, seen.
 """
 
 from __future__ import annotations
@@ -147,6 +152,10 @@ def main(argv=None) -> None:
     ap.add_argument("--holdout", type=int, default=8, help="every Nth frame is held out for the PSNR check")
     ap.add_argument("--max-init", type=int, default=600000)
     ap.add_argument("--pose-opt", type=float, default=1e-4, help="learning rate of the camera corrections (0: off)")
+    ap.add_argument("--color-opt", type=float, default=1e-3, help="learning rate of the per-frame color correction (0: off)")
+    ap.add_argument("--refine-stop", type=float, default=0.6, help="share of the steps that densify")
+    ap.add_argument("--grow-grad", type=float, default=0.0005, help="densify where the 2D gradient is above this")
+    ap.add_argument("--labels", type=Path, help="segment_frames.py output: label every Gaussian by vote")
     ap.add_argument("--world", help='JSON {"scale": s, "R": 3x3, "t": 3}: train in the frame scale * R @ x + t')
     a = ap.parse_args(argv)
     t_start = time.time()
@@ -219,8 +228,8 @@ def main(argv=None) -> None:
     lrs = {"means": 1.6e-4 * extent, "scales": 5e-3, "quats": 1e-3, "opacities": 5e-2, "sh0": 2.5e-3, "shN": 2.5e-3 / 20}
     opt = {k: torch.optim.Adam([params[k]], lr=lrs[k], eps=1e-15) for k in params}
     sched = torch.optim.lr_scheduler.ExponentialLR(opt["means"], gamma=0.01 ** (1.0 / a.steps))
-    strategy = DefaultStrategy(verbose=False, refine_stop_iter=int(a.steps * 0.5), reset_every=3000,
-                               refine_every=100, absgrad=True, grow_grad2d=0.0008)
+    strategy = DefaultStrategy(verbose=False, refine_stop_iter=int(a.steps * a.refine_stop), reset_every=3000,
+                               refine_every=100, absgrad=True, grow_grad2d=a.grow_grad)
     strategy.check_sanity(params, opt)
     state = strategy.initialize_state(scene_scale=extent)
 
@@ -228,6 +237,15 @@ def main(argv=None) -> None:
     dw = torch.nn.Parameter(torch.zeros(n, 3, device=dev))
     dt = torch.nn.Parameter(torch.zeros(n, 3, device=dev))
     pose_opt = torch.optim.Adam([dw, dt], lr=a.pose_opt) if a.pose_opt > 0 else None
+    cA = torch.nn.Parameter(torch.zeros(n, 3, 3, device=dev))  # color = (I + cA) @ rgb + cb, per frame
+    cb = torch.nn.Parameter(torch.zeros(n, 3, device=dev))
+    color_opt = torch.optim.Adam([cA, cb], lr=a.color_opt) if a.color_opt > 0 else None
+
+    def colored(rgb, i):
+        if color_opt is None:
+            return rgb.clamp(0, 1)
+        M = torch.eye(3, device=dev) + cA[i]
+        return (rgb @ M.T + cb[i]).clamp(0, 1)
 
     def viewmat(idx):
         idx = torch.as_tensor(idx, device=dev)
@@ -251,7 +269,7 @@ def main(argv=None) -> None:
         sh_degree = min(step // 1000, a.sh)
         out, alpha, info = render([i], sh_degree)
         gt = imgs[i].float()[None] / 255.0
-        pred = out[..., :3].clamp(0, 1)
+        pred = colored(out[..., :3], i)
         l1 = (pred - gt).abs().mean()
         loss = 0.8 * l1 + 0.2 * (1 - ssim(pred.permute(0, 3, 1, 2), gt.permute(0, 3, 1, 2)))
         strategy.step_pre_backward(params, opt, state, step, info)
@@ -263,6 +281,9 @@ def main(argv=None) -> None:
             pose_opt.step()
         if pose_opt is not None:
             pose_opt.zero_grad(set_to_none=True)
+        if color_opt is not None:
+            color_opt.step()
+            color_opt.zero_grad(set_to_none=True)
         sched.step()
         strategy.step_post_backward(params, opt, state, step, info, packed=False)
         if step % 1000 == 0 or step == a.steps - 1:
@@ -270,14 +291,16 @@ def main(argv=None) -> None:
                   f"{(time.time() - last):.0f} s", flush=True)
             last = time.time()
 
-    if pose_opt is not None and test:  # held-out cameras: align them to the finished splat
+    if (pose_opt is not None or color_opt is not None) and test:  # held-out frames: align them to the splat
         for k in params:
             params[k].requires_grad_(False)
-        topt = torch.optim.Adam([dw, dt], lr=a.pose_opt * 5)
+        groups = ([{"params": [dw, dt], "lr": a.pose_opt * 5}] if pose_opt is not None else []) + \
+                 ([{"params": [cA, cb], "lr": a.color_opt}] if color_opt is not None else [])
+        topt = torch.optim.Adam(groups)
         for it in range(40 * len(test)):
             i = test[it % len(test)]
             out, _, _ = render([i], a.sh)
-            loss = (out[..., :3].clamp(0, 1) - imgs[i].float()[None] / 255.0).abs().mean()
+            loss = (colored(out[..., :3], i) - imgs[i].float()[None] / 255.0).abs().mean()
             loss.backward()
             topt.step()
             topt.zero_grad(set_to_none=True)
@@ -287,12 +310,12 @@ def main(argv=None) -> None:
         psnr_train = []
         for i in train[:: max(1, len(train) // 60)]:
             out, _, _ = render([i], a.sh)
-            mse = ((out[..., :3].clamp(0, 1) - imgs[i].float()[None] / 255.0) ** 2).mean()
+            mse = ((colored(out[..., :3], i) - imgs[i].float()[None] / 255.0) ** 2).mean()
             psnr_train.append(float(-10 * torch.log10(mse)))
         psnr = []
         for i in test:
             out, _, _ = render([i], a.sh)
-            mse = ((out[..., :3].clamp(0, 1) - imgs[i].float()[None] / 255.0) ** 2).mean()
+            mse = ((colored(out[..., :3], i) - imgs[i].float()[None] / 255.0) ** 2).mean()
             psnr.append(float(-10 * torch.log10(mse)))
         sh = torch.cat([params["sh0"], params["shN"]], 1)
         write_ply(a.out / "splat.ply", params["means"].cpu().numpy(),
@@ -300,7 +323,50 @@ def main(argv=None) -> None:
                   sh[:, 1:].transpose(1, 2).reshape(len(sh), -1).cpu().numpy(),  # 3DGS order: channel-major
                   params["opacities"].cpu().numpy(), params["scales"].cpu().numpy(),
                   F.normalize(params["quats"], dim=-1).cpu().numpy())
+        V = torch.cat([viewmat([i]) for i in range(n)]).cpu().numpy()
+        (a.out / "cameras.json").write_text(json.dumps([
+            {"name": images[i]["name"], "w2c": V[i].round(7).tolist(), "K": Ks[i].cpu().numpy().round(4).tolist(),
+             "size": [Ww, Hh], "held_out": i in set(test)} for i in range(n)]))
+        label_info = None
+        if a.labels and (a.labels / "labels.npz").exists():
+            lab = np.load(a.labels / "labels.npz")
+            class_names = [c.strip() for c in json.loads((a.labels / "meta.json").read_text())["classes"]]
+            ncls = len(class_names)
+            means = params["means"]
+            votes = torch.zeros(len(means), ncls, device=dev)
+            colors_all = torch.cat([params["sh0"], params["shN"]], 1)
+            for i in range(n):
+                name = images[i]["name"]
+                if name not in lab.files:
+                    continue
+                vm = viewmat([i])
+                out, _, _ = rasterization(means, F.normalize(params["quats"], dim=-1), torch.exp(params["scales"]),
+                                          torch.sigmoid(params["opacities"]), colors_all, vm, Ks[[i]], Ww, Hh,
+                                          sh_degree=a.sh, packed=False, near_plane=0.01, far_plane=100.0,
+                                          render_mode="RGB+ED")
+                depth = out[0, ..., 3]
+                pc = means @ vm[0, :3, :3].T + vm[0, :3, 3]
+                z = pc[:, 2]
+                uvw = pc @ Ks[i].T
+                u, v = uvw[:, 0] / z.clamp_min(1e-6), uvw[:, 1] / z.clamp_min(1e-6)
+                ok = (z > 0.05) & (u >= 0) & (u < Ww) & (v >= 0) & (v < Hh)
+                idx = torch.nonzero(ok).squeeze(1)
+                ui, vi = u[idx].long(), v[idx].long()
+                vis = (z[idx] - depth[vi, ui]).abs() < 0.04 + 0.02 * z[idx]  # on the visible surface
+                idx, ui, vi = idx[vis], ui[vis], vi[vis]
+                m = torch.from_numpy(lab[name].astype(np.int64)).to(dev)
+                cl = m[(vi * m.shape[0] // Hh).clamp(max=m.shape[0] - 1), (ui * m.shape[1] // Ww).clamp(max=m.shape[1] - 1)]
+                votes.index_put_((idx, cl), torch.ones_like(idx, dtype=torch.float32), accumulate=True)
+            seen = votes.sum(1)
+            cls = votes.argmax(1)
+            share = votes.max(1).values / seen.clamp_min(1)
+            cls[seen == 0] = -1
+            np.savez_compressed(a.out / "gauss_labels.npz", cls=cls.cpu().numpy().astype(np.int16),
+                                share=share.cpu().numpy().astype(np.float16), seen=seen.cpu().numpy().astype(np.int32),
+                                classes=np.array(class_names))
+            label_info = {"labelled": int((seen > 0).sum()), "of": int(len(means))}
     meta = {"steps": a.steps, "gaussians": int(len(params["means"])), "frames": n, "held_out": len(test),
+            "labels": label_info,
             "psnr_held_out": round(float(np.mean(psnr)), 2) if psnr else None,
             "psnr_train": round(float(np.mean(psnr_train)), 2),
             "camera_moved_cm_median": round(100 * float(moved[train].median()), 1),

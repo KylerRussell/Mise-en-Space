@@ -238,6 +238,19 @@ def cmd_splat_attach(args):
     print(f"{args.scene}: room splat {rel} ({(d / rel).stat().st_size / 1e6:.0f} MB)")
 
 
+def cmd_empty_room(args):
+    from .pipeline.empty_room import empty_scene
+    from .scene.models import Scene
+
+    d = Path(args.data) / args.scene
+    rep = empty_scene(d, Path(args.splat_dir), args.name)
+    if args.use:
+        scene = Scene.model_validate_json((d / "scene.json").read_text())
+        scene.room.splat = rep["path"]
+        (d / "scene.json").write_text(scene.model_dump_json(indent=2))
+    print(json.dumps(rep, indent=1))
+
+
 def cmd_join_poses(args):
     from .pipeline.learned import join
 
@@ -276,6 +289,10 @@ def main(argv=None):
     a = sub.add_parser("splat-attach", help="make a trained splat (in the scene's frame) the scene's room splat")
     a.add_argument("scene"); a.add_argument("splat"); a.add_argument("--name", help="file name in the scene's splats/")
     a.set_defaults(fn=cmd_splat_attach)
+    a = sub.add_parser("empty-room", help="the scene's home without its things, from a labelled splat")
+    a.add_argument("scene"); a.add_argument("splat_dir", help="splat_train.py output: splat.ply + gauss_labels.npz")
+    a.add_argument("--name", default="empty.ply"); a.add_argument("--use", action="store_true", help="make it the room splat")
+    a.set_defaults(fn=cmd_empty_room)
     a = sub.add_parser("package"); a.add_argument("splat"); a.add_argument("labels", help="labels.npy, one int per Gaussian")
     a.add_argument("out"); a.add_argument("--names", help="JSON {label: {id, name, category}}"); a.add_argument("--openings", help="JSON list of openings")
     a.add_argument("--background", type=int, nargs="*", default=[0]); a.add_argument("--ceiling", type=float, default=2.5)

@@ -67,6 +67,7 @@ def main(argv=None) -> None:
     ap.add_argument("--out", type=Path, help="default: data/scans/learned/NAME (data/scans/splats/NAME with --splat)")
     ap.add_argument("--splat", type=Path, help="train a splat on this solve's frames instead (splat_train.py)")
     ap.add_argument("--segment", action="store_true", help="label the frames' pixels instead (segment_frames.py)")
+    ap.add_argument("--labels", type=Path, help="with --splat: segment_frames.py output, to label every Gaussian")
     ap.add_argument("--scene-from", type=Path, help="with --splat: a scan's result.json; train in that scene's frame")
     a, extra = ap.parse_known_args(argv)  # anything else goes to the remote script (--chunk, --steps, ...)
     session = f"mise-{a.name}"
@@ -94,6 +95,9 @@ def main(argv=None) -> None:
         if a.splat:
             for f in ("cameras.txt", "images.txt", "points3D.txt"):
                 tar.add(a.splat / "sparse" / "0" / f, f"in/solve/sparse/0/{f}")
+            if a.labels:
+                for f in ("labels.npz", "meta.json"):
+                    tar.add(a.labels / f, f"in/labels/{f}")
 
     if a.segment:
         args = ["--frames", "/content/in", "--out", "/content/out", *extra]
@@ -102,6 +106,8 @@ def main(argv=None) -> None:
         if a.scene_from:
             ref = next(pc for pc in json.loads(a.scene_from.read_text())["pieces"] if pc.get("scene_from_solve"))
             args += ["--world", json.dumps(ref["scene_from_solve"])]
+        if a.labels:
+            args += ["--labels", "/content/in/labels"]
     else:
         args = ["--frames", "/content/in", "--out", "/content/out", "--model", a.model]
         args += [f"--t0={a.t0}"] if a.t0 is not None else []
