@@ -321,9 +321,23 @@ retried, and can render splats from given cameras (`--render A.ply B.ply --camer
 4. Wire `splat-home` onto the end of `learned-scan` (flag) once the above settles.
 5. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
 
+## To resolve later: the empty home (noted 2026-11-27)
+
+- The bedroom window is missed: its curtains were drawn all through the walk, and curtains are
+  things, not window evidence. Add it by hand, or coach "open the curtains for a second".
+- Not modelled: the pipe along the main room's block wall, crown moulding, the bulkhead.
+- A change of material part-way along one wall (drywall to block) isn't modelled; materials are
+  per wall. Every transition in this home falls at a corner, so it hasn't mattered yet.
+- Door detection can take an open leaf standing against a wall for a closed door (the bedroom
+  has a borderline one beside a doorway, `leaf_room_4.6_*`).
+- Block walls are found by joint spacing on close patches; brick (7.6 cm courses) isn't looked
+  for. Materials are otherwise named by hand-set rules; an image model could name them.
+- Under furniture the floor is filled from the open floor around it, so it can be a shade off.
+- Window glass is a daylight tint, not what is outside.
+
 ## Smaller open items
 
-- Windows aren't in the apartment scene yet: the main room's north wall and the bedroom.
+- Windows in `my-apartment` (the older scene): the main room's north wall and the bedroom.
 - Lights in the bedroom and bathroom; shelves and rods in the closets.
 - Detecting appliances (only counters are detected automatically).
 - `segment_home` over-splits open-plan rooms at narrow spots.
