@@ -198,6 +198,9 @@ def scene_objects(s: ply.Splat, found: list[Found], scene_dir: Path, walls=None)
             keep &= 1 / (1 + np.exp(-s.opacity)) >= 0.1
         if s.scale is not None:
             keep &= np.exp(s.scale).max(1) <= 0.12
+        # inside its box: the box leaves out the strays (floaters near the cameras), so they go too
+        keep &= decompose.points_in_polygon(s.xyz[:, :2], f.box.footprint(0.05))
+        keep &= (s.xyz[:, 2] >= f.box.z0 - 0.05) & (s.xyz[:, 2] <= f.box.z0 + f.box.h + 0.15)
         if o.support == "floor":
             keep &= s.xyz[:, 2] > 0.005  # nothing of it below the floor (floaters)
         sub = s.subset(keep)
