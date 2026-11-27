@@ -447,3 +447,109 @@ def variant_bounds(a: float, b: float, n: int, t_end: float, step: float = 6.0) 
         g = step * ((k + 1) // 2)
         out.append((max(0.0, a - g), min(t_end, b + g / 3)) if k % 2 else (max(0.0, a - g / 3), min(t_end, b + g)))
     return out
+
+
+
+def refine_poses(solve: Path, frames_dir: Path, work: Path, out: Path, t0: float | None = None,
+                 t1: float | None = None, max_err_px: float = 4.0, say=print) -> dict:
+    """Bundle-adjust a learned solve's cameras on SIFT matches (CPU), keeping its metric frame.
+
+    A learned model's cameras are good for a floor plan but off by a degree or more from frame to
+    frame (the bin's rim reprojects 55 px apart through Depth Anything 3 window cameras, 5.6 px
+    through COLMAP's): a splat trained on them smears. Here the model's poses are the start: SIFT
+    features and matches as the scan makes them, points triangulated from the given poses, then
+    bundle adjustment of poses and points with the calibrated camera fixed (intrinsics.json next
+    to the frames), outlier observations dropped and adjusted again. The refined cameras are put
+    back in the solve's frame by the similarity that maps their centers onto the original ones,
+    and written as a solve folder (calibrated pinhole camera, the model's points kept as seeds).
+    """
+    import shutil
+
+    import pycolmap
+
+    from .scan import ScanEvents, ScanOptions, _features
+
+    solve, frames_dir, work, out = Path(solve), Path(frames_dir), Path(work), Path(out)
+    rec0 = pycolmap.Reconstruction(str(solve / "sparse" / "0"))
+    times = {k["name"]: k["t"] for k in json.loads((solve / "frames.json").read_text())}
+    names = sorted(im.name for im in rec0.images.values()
+                   if (t0 is None or times[im.name] >= t0) and (t1 is None or times[im.name] <= t1))
+    kept = [{"name": n, "t": times[n]} for n in names]
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "frames").mkdir(exist_ok=True)
+    for n in names:
+        if not (work / "frames" / n).exists():
+            shutil.copy2(frames_dir / "frames" / n, work / "frames" / n)
+    db_path = work / "database.db"
+    if not (work / "matched").exists():
+        say(f"features and matches for {len(names)} frames (CPU)")
+        _features(work, kept, ScanOptions(scene_id="refine"), ScanEvents())
+        (work / "matched").write_text("ok")
+    K = json.loads((frames_dir / "intrinsics.json").read_text())
+    db = pycolmap.Database.open(str(db_path))
+    db_images = {im.name: im for im in db.read_all_images()}
+    cam_id = next(iter(db_images.values())).camera_id
+    db.close()
+    rec = pycolmap.Reconstruction()
+    rec.add_camera_with_trivial_rig(pycolmap.Camera(
+        model="OPENCV", width=K["width"], height=K["height"], camera_id=cam_id,
+        params=[K["fx"], K["fy"], K["cx"], K["cy"], K["k1"], K["k2"], K["p1"], K["p2"]]))
+    by_name = {im.name: im for im in rec0.images.values()}
+    for n in names:
+        rec.add_image_with_trivial_frame(pycolmap.Image(name=n, camera_id=cam_id, image_id=db_images[n].image_id),
+                                         by_name[n].cam_from_world())
+    say("triangulating from the model's poses")
+    rec = pycolmap.triangulate_points(rec, str(db_path), str(work / "frames"), str(work / "tri"), clear_points=True)
+    err0 = rec.compute_mean_reprojection_error()
+    ba = pycolmap.BundleAdjustmentOptions()
+    ba.refine_focal_length = ba.refine_principal_point = ba.refine_extra_params = False
+    for rnd in range(3):
+        pycolmap.bundle_adjustment(rec, ba)
+        rec.update_point_3d_errors()
+        bad = [pid for pid, p in rec.points3D.items() if p.error > max_err_px or p.track.length() < 2]
+        for pid in bad:
+            rec.delete_point3D(pid)
+        say(f"bundle adjustment {rnd + 1}: {rec.num_points3D()} points, {rec.compute_mean_reprojection_error():.2f} px")
+    err1 = rec.compute_mean_reprojection_error()
+    A = np.array([rec.find_image_with_name(n).projection_center() for n in names])
+    B = np.array([by_name[n].projection_center() for n in names])
+    s, R, t = umeyama(A, B)
+    rec.transform(pycolmap.Sim3d(s, pycolmap.Rotation3d(R), t))
+    moved = np.linalg.norm(np.array([rec.find_image_with_name(n).projection_center() for n in names]) - B, axis=1)
+    turns = [np.degrees(np.arccos(np.clip((np.trace(rec.find_image_with_name(n).cam_from_world().rotation.matrix()
+                                                     @ by_name[n].cam_from_world().rotation.matrix().T) - 1) / 2, -1, 1)))
+             for n in names]
+    if out.exists():
+        shutil.rmtree(out)
+    sp = out / "sparse" / "0"
+    sp.mkdir(parents=True)
+    for f in ("frames.json", "depth.npz"):
+        if (solve / f).exists():
+            shutil.copy2(solve / f, out / f)
+    (sp / "cameras.txt").write_text("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n"
+                                    f"1 PINHOLE {K['width']} {K['height']} {K['fx']} {K['fy']} {K['cx']} {K['cy']}\n")
+    body = [ln for ln in (solve / "sparse" / "0" / "images.txt").read_text().splitlines() if not ln.startswith("#")]
+    keep = set(names)
+    lines = ["# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME", "# POINTS2D[] as (X, Y, POINT3D_ID)"]
+    for head, pts in zip(body[0::2], body[1::2]):
+        p = head.split()
+        if p[9] not in keep:
+            continue
+        cw = rec.find_image_with_name(p[9]).cam_from_world()
+        q, tt = cw.rotation.quat, cw.translation  # quat: x, y, z, w
+        lines += [f"{p[0]} {q[3]:.9f} {q[0]:.9f} {q[1]:.9f} {q[2]:.9f} {tt[0]:.6f} {tt[1]:.6f} {tt[2]:.6f} 1 {p[9]}", pts]
+    (sp / "images.txt").write_text("\n".join(lines) + "\n")
+    ids = {int(ln.split()[0]) for ln in lines[2::2]}
+    with open(sp / "points3D.txt", "w") as fo:  # the model's points seen by the frames kept
+        for ln in (solve / "sparse" / "0" / "points3D.txt").read_text().splitlines():
+            if ln.startswith("#") or {int(x) for x in ln.split()[8::2]} <= ids:
+                fo.write(ln + "\n")
+    rep = {"frames": len(names), "sift_points": rec.num_points3D(), "reproj_px_before": round(err0, 2),
+           "reproj_px_after": round(err1, 2), "moved_cm_median": round(100 * float(np.median(moved)), 1),
+           "moved_cm_p90": round(100 * float(np.percentile(moved, 90)), 1),
+           "turned_deg_median": round(float(np.median(turns)), 2), "turned_deg_p90": round(float(np.percentile(turns, 90)), 2),
+           "scale_back": round(float(s), 4)}
+    meta = json.loads((solve / "meta.json").read_text())
+    meta["refined"] = rep
+    (out / "meta.json").write_text(json.dumps(meta, indent=1))
+    return rep
