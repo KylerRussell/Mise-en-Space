@@ -124,7 +124,6 @@ def splat_home(scene_dir: Path, work: Path, solve: Path, frames_dir: Path, scan_
     (md / "cameras.json").write_text(json.dumps([c for _, cams in parts for c in cams]))
     (scene_dir / "splats").mkdir(exist_ok=True)
     shutil.copyfile(md / "splat.ply", scene_dir / "splats" / "home.ply")
-    scene.room.splat = "splats/home.ply"
     (scene_dir / "scene.json").write_text(scene.model_dump_json(indent=2))
     say(f"merged: {len(merged)} Gaussians; rooms from windows {rep['owner']}")
 
@@ -134,10 +133,15 @@ def splat_home(scene_dir: Path, work: Path, solve: Path, frames_dir: Path, scan_
     from .objects import add_scanned_objects
 
     objs = add_scanned_objects(scene_dir, md)  # empty_scene labelled the merged splat
+    # the room is the empty home; what stood in it comes back as the objects (splats/home.ply, the
+    # home as filmed, stays beside it)
+    scene = Scene.model_validate_json((scene_dir / "scene.json").read_text())
+    scene.room.splat = "splats/empty.ply"
+    (scene_dir / "scene.json").write_text(scene.model_dump_json(indent=2))
     say(f"{objs['objects']} objects ({objs['fixtures']} fixtures): " + ", ".join(f"{k} {v}" for k, v in objs["by_kind"].items()))
     report = {"objects": {k: v for k, v in objs.items() if k != "list"}, "windows": [{"room": scene.room.spaces[r].name, "t": [round(a, 1), round(b, 1)], "frames": n,
                            "psnr_held_out": m.get("psnr_held_out"), "psnr_train": m.get("psnr_train"),
                            "gaussians": m.get("gaussians")} for (r, a, b, n), m in zip(visits, scores)],
-              "merge": rep, "empty": empty, "splat": "splats/home.ply"}
+              "merge": rep, "empty": empty, "splat": "splats/empty.ply", "as_filmed": "splats/home.ply"}
     (run / "report.json").write_text(json.dumps(report, indent=1, default=float))
     return report

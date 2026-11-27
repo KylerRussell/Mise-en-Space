@@ -157,8 +157,14 @@ floor plan (and a reference object of known size).
 **Splat and empty home (Colab GPU).** After a learned scan:
 
 ```bash
-mise splat-home my-flat        # splats/home.ply (the home as filmed) and splats/empty.ply (its shell)
+mise learned-scan tour.mp4 --scene my-flat --box box.json --splat   # video to everything, one command
+mise splat-home my-flat        # or Stage 2 alone, after a learned scan
+mise scene-splat my-flat       # one splat of a layout: the empty home with its objects placed
 ```
+
+The scene's room splat is the empty home (`splats/empty.ply`); what stood in it comes back as
+objects, nudged apart where their rough boxes overlap (built-ins stay where they were filmed).
+`splats/home.ply`, the home as filmed, stays beside it.
 
 It bundle-adjusts the cameras, trains one Gaussian splat per room visit on concurrent Colab
 sessions (depth from the model as a guide, each camera learning a small correction), and joins

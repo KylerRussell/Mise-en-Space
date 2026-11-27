@@ -225,7 +225,14 @@ lays them out; `--solve/--frames/--scan-result/--semantic/--refined` override). 
    5 s into the rooms either side (`splat_flow.room_visits`).
 3. Merges them: each room from the window whose cameras stood in it, a room nobody stood in
    (a closet looked into) from the window that came closest (`empty_room.merge_splats`).
-4. Writes `splats/home.ply` (the room's splat) and `splats/empty.ply` (the empty home).
+4. Writes `splats/home.ply` (the home as filmed) and `splats/empty.ply` (the empty home, with
+   materials, trim, windows and doors), adds the objects, and makes the empty home the scene's
+   room splat (the editor shows the shell with the objects in it; nothing is shown twice).
+
+`mise learned-scan VIDEO --scene S --box CLICKS --splat` runs it at the end of Stage 1: video to
+the finished scene in one command (Stage 1's Colab solves are reused when the work folder has
+them). `mise scene-splat S [--variant V] [--no-fixtures]` writes one splat of a layout (shell +
+objects at their poses, `objects.compose`) for renders outside the editor.
 
 What it took to get sharp splats (held-out PSNR; renders saved beside the photos):
 
@@ -299,6 +306,11 @@ with a toilet is a vanity); cabinets beside the kitchen join it. Clutter (clothe
 towels, books) and curtains don't become objects. On the home: 27 objects, 7 of them fixtures;
 the bed, desk with its screens, sofa, chairs, kitchen run and island, toilet and vanity all
 where they are in the photos. Smaller mislabels remain (built-in closet shelving as "Cabinets").
+Each object's splat keeps what is inside its box but isn't shell (unlabelled legs and edges),
+without faint or large soft Gaussians (the room's haze); floor-standing objects are cut at the
+floor. The boxes are rough, so `objects.settle` nudges movable ones apart and back inside the
+floor (the smaller of two moves; built-ins stay where they were filmed, so a fixture past a short
+outline stays a warning), and an object on a wall names the wall (`wall:<id>`).
 
 Known limits of the shell: fixtures go with the furniture (kitchen cabinets, counters); the main
 room's bulkhead isn't in the layout; patches of floor differ in shade where copied; where the
@@ -318,8 +330,7 @@ retried, and can render splats from given cameras (`--render A.ply B.ply --camer
 3. Objects: swap scanned objects for catalog products of the same kind and size; check
    headings (front faces away from the wall it stands against). Splat sharpness of furniture
    doesn't matter (it is re-added as objects); the shell's does.
-4. Wire `splat-home` onto the end of `learned-scan` (flag) once the above settles.
-5. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
+4. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
 
 ## To resolve later: the empty home (noted 2026-11-27)
 

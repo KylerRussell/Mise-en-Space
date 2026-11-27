@@ -129,11 +129,19 @@ def find_objects(s: ply.Splat, cls: np.ndarray, classes: list[str], rooms: list[
             found.append(Found(kind, box, mem, len(mem), str(u[np.argmax(c)]),
                                int(np.bincount(rk[rk >= 0]).argmax()) if (rk >= 0).any() else -1))
             taken[mem] = True
-    # each object also takes the other things inside its box (a bed's clothes, a desk's clutter)
-    rest = base & ~taken
+    # each object takes everything inside its box that isn't the shell: its unlabelled legs and
+    # edges, a bed's clothes, a desk's clutter (the room's splat is the empty shell, so what isn't
+    # in an object isn't shown)
+    shell = np.isin(names, ["wall", "ceiling", "door", "screen door", "windowpane", "window", "mirror", "glass"])
+    on_floor = np.isin(names, ["floor", "rug"]) & (X[:, 2] < 0.03)
+    faint = (1 / (1 + np.exp(-s.opacity)) < 0.1) if s.opacity is not None else np.zeros(len(X), bool)
+    if s.scale is not None:  # big, soft Gaussians are the room's haze, not the thing
+        faint |= np.exp(s.scale).max(1) > 0.12
+    rest = inside & ~shell & ~on_floor & ~faint & ~taken
     for f in sorted(found, key=lambda f: -f.box.w * f.box.d):
         poly = f.box.footprint(0.03)
-        inb = rest & decompose.points_in_polygon(X[:, :2], poly) & (X[:, 2] >= f.box.z0 - 0.03) & \
+        lo_z = 0.015 if f.box.z0 < 0.45 else f.box.z0 - 0.03  # down to the floor for what stands on it
+        inb = rest & decompose.points_in_polygon(X[:, :2], poly) & (X[:, 2] >= lo_z) & \
             (X[:, 2] <= f.box.z0 + f.box.h + 0.15)
         f.members = np.union1d(f.members, np.nonzero(inb)[0])
         rest &= ~inb
@@ -150,8 +158,6 @@ def scene_objects(s: ply.Splat, found: list[Found], scene_dir: Path, walls=None)
     for f in sorted(found, key=lambda f: (f.kind, -f.box.w * f.box.d)):
         count[f.kind] = count.get(f.kind, 0) + 1
         oid = f"scan_{f.kind}_{count[f.kind]}"
-        sub = s.subset(np.isin(np.arange(len(s)), f.members))
-        ply.write_ply(scene_dir / "objects" / f"{oid}.ply", decompose.to_canonical(sub, f.box))
         boxes[oid] = f.box
         cat, fixture = KINDS[f.kind][1], KINDS[f.kind][2]
         base = NAMES[f.kind]
@@ -182,7 +188,74 @@ def scene_objects(s: ply.Splat, found: list[Found], scene_dir: Path, walls=None)
             o.dims.h, o.pose.z = b.z0 + b.h, 0.0
         else:
             o.support = "ceiling" if o.id.startswith("scan_fan") else "wall"
+    # the splats, in the objects' own frame: footprint centered, base at the pose's z (the floor,
+    # for what stands on it)
+    from dataclasses import replace as _replace
+
+    for o, f in zip(out, sorted(found, key=lambda f: (f.kind, -f.box.w * f.box.d))):
+        keep = np.isin(np.arange(len(s)), f.members)
+        if s.opacity is not None:  # faint or big, soft Gaussians are the room's haze, not the thing
+            keep &= 1 / (1 + np.exp(-s.opacity)) >= 0.1
+        if s.scale is not None:
+            keep &= np.exp(s.scale).max(1) <= 0.12
+        if o.support == "floor":
+            keep &= s.xyz[:, 2] > 0.005  # nothing of it below the floor (floaters)
+        sub = s.subset(keep)
+        b = f.box if o.support != "floor" else _replace(f.box, z0=0.0)
+        ply.write_ply(scene_dir / "objects" / f"{o.id}.ply", decompose.to_canonical(sub, b))
     return out
+
+
+def settle(scene, rounds: int = 25) -> dict:
+    """Scanned boxes are rough: nudge them so they sit inside the floor, under the ceiling and
+    clear of one another (of two that overlap, the smaller movable one moves; fixtures stay
+    unless they stick out of the room). Returns what is left over."""
+    from ..scene import geometry as g
+    from ..scene.checks import check_layout
+
+    scanned = {o.id: o for o in scene.objects if o.source == "scanned"}
+    moved = set()
+    vs = []
+    for _ in range(rounds):
+        vs = [v for v in check_layout(scene) if v.kind in ("collision", "out_of_room", "crosses_wall")
+              and all(i in scanned for i in v.objects)
+              and not (v.kind != "collision" and scanned[v.objects[0]].fixture and "ceiling" not in v.message)]
+        if not vs:
+            break
+        for v in vs:
+            if v.kind == "collision":
+                a, b = (scanned[i] for i in v.objects)
+                area = lambda o: o.dims.w * o.dims.d  # noqa: E731
+                mover, other = sorted((a, b), key=lambda o: (not o.fixture, -area(o)))[::-1] \
+                    if a.fixture != b.fixture else sorted((a, b), key=area)
+                if mover.fixture and not other.fixture:
+                    mover, other = other, mover
+                d = np.array([mover.pose.x - other.pose.x, mover.pose.y - other.pose.y])
+                d = d / np.linalg.norm(d) if np.linalg.norm(d) > 1e-6 else np.array([1.0, 0.0])
+                step = (v.amount_m or 0.02) + 0.01
+            else:
+                mover = scanned[v.objects[0]]
+                if "ceiling" in v.message:
+                    mover.dims.h = max(0.05, mover.dims.h - (v.amount_m or 0) - 0.01)
+                    continue
+                if mover.fixture:  # built in where it was filmed: the outline is what's short
+                    continue
+                fp = g.object_footprint(mover)  # its outline, every 1 cm: a thin overhang shows
+                pts = np.concatenate([np.linspace(fp[i], fp[(i + 1) % len(fp)],
+                                                  max(2, int(np.linalg.norm(fp[(i + 1) % len(fp)] - fp[i]) / 0.01)))
+                                      for i in range(len(fp))])
+                ins = np.zeros(len(pts), bool)
+                for poly in scene.room.polygons():
+                    ins |= g.points_in_polygon(pts, poly)
+                if not ins.any() or ins.all():
+                    continue
+                d = pts[ins].mean(0) - pts[~ins].mean(0)
+                d = d / max(np.linalg.norm(d), 1e-6)
+                step = (v.amount_m or 0.02) + 0.01
+            mover.pose.x += float(d[0] * step)
+            mover.pose.y += float(d[1] * step)
+            moved.add(mover.id)
+    return {"moved": len(moved), "left": [v.message for v in vs]}
 
 
 def add_scanned_objects(scene_dir: Path, splat_dir: Path) -> dict:
@@ -199,8 +272,39 @@ def add_scanned_objects(scene_dir: Path, splat_dir: Path) -> dict:
     cls = spread_labels(s.xyz.astype(np.float64), cls)
     found = find_objects(s, cls, classes, [np.array(sp.polygon, float) for sp in scene.room.spaces])
     objs = scene_objects(s, found, scene_dir)
+    from ..scene import geometry as g
+
+    for o in objs:
+        if o.support == "wall" and scene.room.walls:
+            o.support = f"wall:{g.nearest_wall(np.array([o.pose.x, o.pose.y]), scene.room)[0].id}"
     scene.objects = [o for o in scene.objects if o.source != "scanned"] + objs
+    settled = settle(scene)
     (scene_dir / "scene.json").write_text(scene.model_dump_json(indent=2))
-    return {"objects": len(objs), "fixtures": sum(o.fixture for o in objs),
+    return {"objects": len(objs), "fixtures": sum(o.fixture for o in objs), "settled": settled,
             "by_kind": {k: sum(1 for f in found if f.kind == k) for k in KINDS if any(f.kind == k for f in found)},
             "list": [(o.id, o.name, round(o.dims.w, 2), round(o.dims.d, 2), round(o.dims.h, 2), o.support) for o in objs]}
+
+
+def compose(scene, scene_dir: Path, variant: str = "main", fixtures: bool = True):
+    """One splat of a layout: the room's splat (the empty home) with every splat object where the
+    layout puts it. For renders outside the editor; the editor composes the same way."""
+    parts = []
+    if scene.room.splat and (scene_dir / scene.room.splat).exists():
+        parts.append(ply.read_ply(scene_dir / scene.room.splat))
+    for o in scene.resolve(variant):
+        if (not fixtures and o.fixture) or o.asset_kind != "splat" or not o.asset:
+            continue
+        if not (scene_dir / o.asset).exists():
+            continue
+        s = ply.read_ply(scene_dir / o.asset)
+        parts.append(ply.transform(s, R=ply.rot_z(o.pose.yaw), t=np.array([o.pose.x, o.pose.y, o.pose.z])))
+    if not parts:
+        raise ValueError("nothing to compose: no room splat and no splat objects")
+    k = max(0 if p.f_rest is None else p.f_rest.shape[1] for p in parts)  # pad view-dependent colour to one size
+    for p in parts:
+        n = 0 if p.f_rest is None else p.f_rest.shape[1]
+        if n < k:
+            p.f_rest = np.concatenate([np.zeros((len(p), n), np.float32) if p.f_rest is None else p.f_rest,
+                                       np.zeros((len(p), k - n), np.float32)], 1)
+        p.extra = {}
+    return ply.Splat.concat(parts)

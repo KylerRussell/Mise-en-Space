@@ -220,6 +220,14 @@ def cmd_learned_scan(args):
     args.semantic = str(sem) if (sem / "labels.npz").exists() else None
     args.resume, args.t0, args.t1 = False, None, None
     cmd_scan(args)
+    if args.splat:  # Stage 2: the splat, the empty home (materials, trim, windows, doors) and the objects
+        from .pipeline.splat_flow import splat_home
+
+        rep = splat_home(Path(args.data) / args.scene, work, home, Path(args.frames), work / "result.json",
+                         semantic=sem if (sem / "labels.npz").exists() else None, gpu=args.splat_gpu, tag=args.scene,
+                         say=lambda m: print(f"[splat] {m}", flush=True))
+        say("splat: " + ", ".join(f"{w['room']} {w['psnr_held_out']} dB" for w in rep["windows"])
+            + f"; {rep['objects']['objects']} objects")
 
 
 def cmd_splat_attach(args):
@@ -298,6 +306,20 @@ def cmd_shell_render(args):
     (d / "splats").mkdir(exist_ok=True)
     ply.write_ply(d / "splats" / args.name, out)
     print(json.dumps({"path": f"splats/{args.name}", "gaussians": len(out), "finishes": finish_summary(scene)}, indent=1))
+
+
+def cmd_scene_splat(args):
+    """One splat of a layout (the empty home and the objects where they stand), for renders."""
+    from .pipeline import ply
+    from .pipeline.objects import compose
+    from .scene.models import Scene
+
+    d = Path(args.data) / args.scene
+    scene = Scene.model_validate_json((d / "scene.json").read_text())
+    out = compose(scene, d, args.variant, fixtures=not args.no_fixtures)
+    path = Path(args.out) if args.out else d / "splats" / f"layout-{args.variant}.ply"
+    ply.write_ply(path, out)
+    print(json.dumps({"path": str(path), "gaussians": len(out)}))
 
 
 def cmd_scan_objects(args):
@@ -381,6 +403,10 @@ def main(argv=None):
     a.add_argument("scene"); a.add_argument("--name", default="empty.ply")
     a.add_argument("--flat", action="store_true", help="without the room's light (shading maps)")
     a.set_defaults(fn=cmd_shell_render)
+    a = sub.add_parser("scene-splat", help="one splat of a layout: the empty home with its objects placed (for renders)")
+    a.add_argument("scene"); a.add_argument("--variant", default="main"); a.add_argument("--out")
+    a.add_argument("--no-fixtures", action="store_true", help="leave the built-ins out")
+    a.set_defaults(fn=cmd_scene_splat)
     a = sub.add_parser("scan-objects", help="the things in a labelled splat as movable objects (after empty-room labels it)")
     a.add_argument("scene"); a.add_argument("splat_dir", help="splat.ply + gauss_labels.npz")
     a.set_defaults(fn=cmd_scan_objects)
@@ -422,6 +448,9 @@ def main(argv=None):
     a.add_argument("--gpu", default="G4,H100", help="Colab GPUs to try, in order")
     a.add_argument("--variants", type=int, default=3, help="solves per window; the one the others agree with is kept")
     a.add_argument("--box", help="clicked rim corners of an object of known size (JSON: known_m, known_side, clicks)")
+    a.add_argument("--splat", action="store_true",
+                   help="then Stage 2 (splat-home): the home's splat, its empty shell and its objects")
+    a.add_argument("--splat-gpu", default="A100,G4,L4,H100", help="Colab GPUs for the room splats")
     a.set_defaults(fn=cmd_learned_scan)
 
     a = sub.add_parser("join-poses", help="join learned solves of overlapping stretches of one video")
