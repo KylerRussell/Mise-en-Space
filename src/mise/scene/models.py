@@ -119,6 +119,8 @@ class Opening(BaseModel):
     top: float = 2.0
     swing: Literal["in", "out", "none", "sliding"] = "in"
     hinge: Literal["left", "right"] = "left"
+    leaf: bool = Field(False, description="a closed door stands in it (an entry or closet door), not an open doorway")
+    color: str | None = Field(None, pattern=r"^#[0-9a-fA-F]{6}$", description="the door's or glass's look, #rrggbb")
 
 
 class Wall(BaseModel):
@@ -183,6 +185,8 @@ class Finish(BaseModel):
     ceiling: Surface | None = None
     wall_overrides: dict[str, Surface] = Field(
         default_factory=dict, description="walls (by wall id) that differ from `walls`: an accent wall, block")
+    trim: Surface | None = Field(None, description="baseboards and door and window casings")
+    baseboard_m: float | None = Field(None, gt=0, description="baseboard height")
 
 
 class Space(BaseModel):

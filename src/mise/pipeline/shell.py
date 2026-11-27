@@ -21,6 +21,39 @@ FLOOR = frozenset({"floor"})
 CEILING = frozenset({"ceiling"})
 
 
+def wall_openings(room, w, thickness: float = 0.4) -> list[tuple]:
+    """The openings in wall `w`, as (opening, center along w): its own, and those listed on a wall
+    of the room on the other side (a doorway goes through both faces of the wall)."""
+    a, b = np.array(w.a, float), np.array(w.b, float)
+    L = float(np.linalg.norm(b - a))
+    if L < 1e-6:
+        return []
+    u = (b - a) / L
+    by_id = {x.id: x for x in room.walls}
+    out = []
+    for o in room.openings:
+        ow = by_id.get(o.wall)
+        if ow is None:
+            continue
+        if ow.id == w.id:
+            out.append((o, float(o.center)))
+            continue
+        if o.kind != "door" or ow.space == w.space:
+            continue
+        oa, ob = np.array(ow.a, float), np.array(ow.b, float)
+        ou = (ob - oa) / max(float(np.linalg.norm(ob - oa)), 1e-6)
+        if abs(float(ou @ u)) < 0.97:  # not parallel
+            continue
+        c = oa + ou * o.center  # the opening's middle, on the other face
+        off = c - a
+        if abs(float(off[0] * u[1] - off[1] * u[0])) > thickness:  # the other face is not across the wall
+            continue
+        along = float(off @ u)
+        if -o.width / 2 < along < L + o.width / 2:
+            out.append((o, along))
+    return out
+
+
 def _surfaces(room, cell: float) -> list[dict]:
     """Sample points of every wall, floor and ceiling: dict(kind, xyz (h, w, 3), normal, u, v, inside (h, w))."""
     import cv2
@@ -46,12 +79,12 @@ def _surfaces(room, cell: float) -> list[dict]:
         S, Z = np.meshgrid(s, z)
         xyz = np.stack([a[0] + S * u[0] + 0.004 * n2[0], a[1] + S * u[1] + 0.004 * n2[1], Z], -1)
         inside = np.ones(S.shape, bool)
-        for o in room.openings:
-            if o.wall == w.id and o.kind == "door":
-                inside &= ~((np.abs(S - o.center) < o.width / 2) & (Z >= o.bottom) & (Z <= o.top))
+        ops = wall_openings(room, w)
+        for o, c in ops:
+            inside &= ~((np.abs(S - c) < o.width / 2) & (Z >= o.bottom) & (Z <= o.top))
         out.append({"kind": "wall", "xyz": xyz, "normal": np.array([n2[0], n2[1], 0.0]),
                     "u": np.array([u[0], u[1], 0.0]), "v": np.array([0.0, 0.0, 1.0]), "inside": inside, "id": w.id,
-                    "space": w.space})
+                    "space": w.space, "S": S, "Z": Z, "openings": ops})
     for sp in room.spaces:
         P = np.array(sp.polygon, float)
         lo, hi = P.min(0), P.max(0)

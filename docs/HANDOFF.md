@@ -268,10 +268,23 @@ the photo-painted shell over its material's color, blurred 0.3 m), so `splats/em
 material x shading looks as captured, and `mise shell-render SCENE` rebuilds it from the scene
 in about a second after a repaint or a new floor (`--flat` without the light). The photo-painted
 version stays as `splats/empty_photo.ply`. On the home: one laminate floor (wood, boards along
-y, #b6aea3), one wall paint (#c2bdb7; the walk-in's walls warmer), one ceiling. Not detected:
-the walk-in's painted block wall (block courses can't be told from door frames and hangers in
-one patch; set `kind: "block"` by hand, or name materials with an image model later); trim
-(baseboards) isn't modelled.
+y, #b6aea3), one wall paint (#c2bdb7; the walk-in's walls warmer), one ceiling. Painted block is read
+off up to six patches per wall: horizontal joints repeating at one 8 in course (0.19-0.22 m,
+strength >= 0.33, the row profile being the median across the row of the vertical gradient, so
+an object doesn't count); two hits make the wall block (one can be a door frame or hanger). Found
+the three exterior block walls (main room behind the desk, walk-in, bedroom), drawn at 1.25 cm
+so the joints show, meeting the drywall at the corners as in the photos.
+
+Trim, windows and doors (`trim.py`): the frames' labels vote on every wall point; where most
+views see window pane or blind it is window, door (or a mirrored closet door reaching the floor)
+a closed door (`Opening.leaf`), each colored as captured (`Opening.color`) and added to the
+scene (`win_*`, `leaf_*`; doorways between rooms are now cut through both faces of the wall).
+Baseboard height and trim color come off the walls' bottom rows (10 cm, grey here; `finish.trim`,
+`finish.baseboard_m`). The render paints baseboards and casings (7 cm, sides and head; windows
+all round) onto the walls and sets door leaves and glass (a daylight tint, not the curtains)
+slightly into the wall. Found: the window behind the desk and three closed doors including the
+entry. Missed: the bedroom window (its curtains were drawn; curtains are things, not window).
+Not modelled: the pipe along the block wall, crown moulding, the bulkhead.
 
 The things come back as movable objects (`objects.py`, `mise scan-objects`, run by `splat-home`):
 the owner's call (2026-11-27) is that furniture is removed and re-added as separate movable 3D

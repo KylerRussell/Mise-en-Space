@@ -221,6 +221,31 @@ def classify(patch: np.ndarray, kind: str, px_per_m: int = 400) -> dict:
     return out
 
 
+def block_evidence(patch: np.ndarray, px_per_m: int = 400) -> bool:
+    """Painted concrete block: horizontal joints repeating at one course (8 in, 0.19-0.22 m).
+    Joints span the row, so the row profile is the median across it of the vertical gradient."""
+    import cv2
+
+    g = patch.mean(-1).astype(np.float32)
+    flat = g / np.maximum(cv2.GaussianBlur(g, (0, 0), 24), 1e-3)
+    gy = np.abs(cv2.Sobel(cv2.GaussianBlur(flat, (0, 0), 1.2), cv2.CV_32F, 0, 1))
+    per, strength = _period(np.median(gy, axis=1), px_per_m, 0.15, 0.26)
+    return per is not None and 0.19 <= per <= 0.22 and strength >= 0.33
+
+
+def block_hits(s: dict, cell: float, cameras, frames_dir, labels, classes, depth, k: int = 6) -> tuple[int, np.ndarray | None]:
+    """How many of up to k patches spread over a wall look like painted block (one alone can be a
+    door frame or a hanger; two or more is the wall), and the best such patch."""
+    hits, best = 0, (None, 0.0)
+    for c, side in clear_patches(s, cell, size_m=0.5, k=k):
+        p, sc = sample_patch(s, c, side, cell, cameras, frames_dir, labels, classes, depth, with_score=True)
+        if p is not None and block_evidence(p):
+            hits += 1
+            if sc > best[1]:
+                best = (p, sc)
+    return hits, best[0]
+
+
 def _texture(kind: str, patch: np.ndarray | None, color: str, info: dict, out_path: Path) -> tuple[str | None, float]:
     """A tileable texture image for the material (written as out_path), and the size it covers."""
     import cv2
@@ -241,7 +266,8 @@ def _texture(kind: str, patch: np.ndarray | None, color: str, info: dict, out_pa
         tex, size = fin.plank_texture(detail, color, w, planks=max(6, int(np.ceil(1.2 / w))), px_per_m=256)
     elif kind == "block":
         c = info.get("module_m") or 0.203
-        tex, size = fin.block_texture(color, detail, block_m=(2 * c, c), px_per_m=256)
+        # painted block: the paint fills the joints, which show as faint lines, not mortar
+        tex, size = fin.block_texture(color, detail, block_m=(2 * c, c), px_per_m=256, joint=0.94)
     else:  # carpet, tile, popcorn, other: the sample itself, tiled
         tex, size = fin.tileable(fin.tint(detail, color, 0.8)), side
     cv2.imwrite(str(out_path), tex)
@@ -323,18 +349,19 @@ def estimate(scene, surfaces: list[dict], cell: float, cameras: list[dict], fram
                     if col is None or n * cell * cell < 0.8:
                         continue
                     col = np.clip(col * gain, 0, 1)
-                    lab = _lab(col)[0]
-                    d_ab = float(np.linalg.norm(lab[1:] - base[1:]))
-                    info, patch = look(s) if n * cell * cell > 1.0 else ({"kind": None}, None)
-                    kind = info.get("kind") or "paint"
-                    if d_ab > 6.0 or kind != f.walls.kind:  # another paint, or another material
+                    d_ab = float(np.linalg.norm(_lab(col)[0][1:] - base[1:]))
+                    hits, patch = block_hits(s, cell, cameras, frames_dir, labels, classes, depth)
+                    kind = "block" if hits >= 2 else "paint"
+                    if d_ab > 6.0 or kind != f.walls.kind:  # another paint, or painted block
                         hexc = _hex(col)
+                        info = {"module_m": 0.203}
                         tex, size = _texture(kind, patch, hexc, info, scene_dir / "finishes" / f"wall_{s['id']}.jpg") \
-                            if kind != "paint" else (None, 1.0)
+                            if kind == "block" else (None, 1.0)
                         f.wall_overrides[s["id"]] = Surface(color=hexc, texture=f"finishes/{tex}" if tex else None,
-                                                            size_m=size, kind=kind, module_m=info.get("module_m"))
+                                                            size_m=size, kind=kind,
+                                                            module_m=0.203 if kind == "block" else None)
                         rep.setdefault("wall_overrides", {})[s["id"]] = {"kind": kind, "color": hexc,
-                                                                         "d_ab": round(d_ab, 1)}
+                                                                         "d_ab": round(d_ab, 1), "block_hits": hits}
         sp.finish = f
         report[sp.name] = rep
         say(f"{sp.name}: " + ", ".join(f"{k} {v.get('kind')} {v.get('color', '')}" for k, v in rep.items()
@@ -377,6 +404,16 @@ def estimate(scene, surfaces: list[dict], cell: float, cameras: list[dict], fram
                     setattr(sp.finish, part, lf.model_copy())
                     report.setdefault(sp.name, {}).setdefault(part, {})["same_as"] = lead.name
             todo = [sp for sp in todo if sp not in same]
+
+    # trim, windows and closed doors
+    from .trim import estimate_trim, find_openings, vote
+
+    report["trim"] = estimate_trim(scene, surfaces, cell, gain)
+    found = find_openings(scene, surfaces, vote(surfaces, cameras, labels, classes, depth, say=say), cell, gain)
+    report["openings"] = [(o.id, o.kind, o.wall, round(o.width, 2), round(o.bottom, 2), round(o.top, 2), o.color)
+                          for o in found]
+    say(f"trim {report['trim']}; {sum(o.kind == 'window' for o in found)} windows, "
+        f"{sum(o.kind == 'door' for o in found)} closed doors")
 
     # the light on each surface, relative to its material's color: kept apart from the color
     for s in surfaces:
@@ -453,20 +490,27 @@ def render_shell(scene, scene_dir: Path, cell: float = 0.025, floor_cell: float 
     shading = dict(np.load(sh_path)) if (lighting and sh_path.exists()) else {}
     rng = np.random.default_rng(0)
     parts = []
-    for c, kinds in ((cell, ("wall", "ceiling")), (floor_cell, ("floor",))):
-        for s in _surfaces(scene.room, c):
-            if s["kind"] not in kinds:
-                continue
-            sf = _material_of(scene, s)
-            if sf is None:
-                continue
-            col = _albedo(sf, s, c, scene_dir, rng)
-            if s["id"] in shading:
-                sh = shading[s["id"]].astype(np.float32)
-                sh = cv2.resize(sh, s["xyz"].shape[1::-1], interpolation=cv2.INTER_LINEAR)
-                col = col * sh[..., None]
-            s["final"] = np.clip(col, 0, 1)
-            parts.append((s, c))
+    from .trim import decorate
+
+    fine = {s["id"]: s for s in _surfaces(scene.room, floor_cell)}
+    finish_of = {sp.id: sp.finish for sp in scene.room.spaces}
+    for s0 in _surfaces(scene.room, cell):
+        sf = _material_of(scene, s0)
+        if sf is None:
+            continue
+        # floors and painted block at the fine grid (boards, joints); plain paint at the coarse one
+        s, c = (fine[s0["id"]], floor_cell) if (s0["kind"] == "floor" or sf.kind == "block") else (s0, cell)
+        col = _albedo(sf, s, c, scene_dir, rng)
+        sh = np.ones(s["xyz"].shape[:2], np.float32)
+        if s["id"] in shading:
+            sh = cv2.resize(shading[s["id"]].astype(np.float32), s["xyz"].shape[1::-1], interpolation=cv2.INTER_LINEAR)
+        col = col * sh[..., None]
+        extra = decorate(s, col, sh, finish_of.get(s.get("space")), c) if s["kind"] == "wall" else []
+        s["final"] = np.clip(col, 0, 1)
+        parts.append((s, c))
+        for e in extra:
+            e["final"] = np.clip(e["final"], 0, 1)
+            parts.append((e, c))
     return _gaussians(parts)
 
 
