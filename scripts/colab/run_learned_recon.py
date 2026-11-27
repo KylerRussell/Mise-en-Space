@@ -95,6 +95,8 @@ def main(argv=None) -> None:
         if a.splat:
             for f in ("cameras.txt", "images.txt", "points3D.txt"):
                 tar.add(a.splat / "sparse" / "0" / f, f"in/solve/sparse/0/{f}")
+            if (a.splat / "depth.npz").exists():  # the model's depth maps: splat_train's depth loss
+                tar.add(a.splat / "depth.npz", "in/solve/depth.npz")
             if a.labels:
                 for f in ("labels.npz", "meta.json"):
                     tar.add(a.labels / f, f"in/labels/{f}")
@@ -131,7 +133,26 @@ def main(argv=None) -> None:
             print("  no GPU free; trying the list again in 2 min", flush=True)
             time.sleep(120)
     try:
-        colab("upload", "-s", session, str(pack), "/content/in.tgz", timeout=1800)
+        # in pieces: some Colab regions refuse an upload of ~90 MB in one request (400 Bad Request)
+        piece, parts = 40 << 20, []
+        with open(pack, "rb") as fh:
+            while chunk := fh.read(piece):
+                part = tmp / f"in.tgz.{len(parts):03d}"
+                part.write_bytes(chunk)
+                parts.append(part)
+        for part in parts:
+            for attempt in range(4):
+                try:
+                    colab("upload", "-s", session, str(part), f"/content/{part.name}", timeout=1800)
+                    break
+                except (RuntimeError, subprocess.TimeoutExpired) as e:
+                    print(f"  (upload of {part.name}, attempt {attempt + 1}, failed: {str(e).strip().splitlines()[-1][-120:]})",
+                          flush=True)
+                    if attempt == 3:
+                        raise
+                    time.sleep(30)
+        remote(session, "import subprocess; subprocess.run('cat /content/in.tgz.[0-9]* > /content/in.tgz && "
+                        "rm /content/in.tgz.[0-9]*', shell=True, check=True)", timeout=300)
         colab("upload", "-s", session, str(HERE / script), f"/content/{script}", timeout=300)
         start = f"""
 import os, subprocess, shlex, sys

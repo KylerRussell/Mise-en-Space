@@ -187,3 +187,44 @@ def label_gaussians(s: ply.Splat, cameras: list[dict], labels: dict[str, np.ndar
     total = votes.sum(1)
     cls = np.where(total > 0, votes.argmax(1), -1)
     return cls, total
+
+
+def merge_splats(parts: list[tuple[ply.Splat, list[dict]]], rooms: list[np.ndarray], cell: float = 0.05) -> tuple[ply.Splat, dict]:
+    """One home splat from splats trained on overlapping stretches (all in the scene's frame).
+
+    A splat trained on a whole tour is spread too thin; one per stretch (a room or two) is
+    sharp. Each room is taken from the stretch whose cameras stood in it most; Gaussians
+    outside every room go to the room nearest them. `parts` are (splat, its cameras.json).
+    """
+    import cv2
+
+    allp = np.vstack(rooms)
+    lo = allp.min(0) - 2.0
+    shape = tuple((np.ceil((allp.max(0) + 2.0 - lo) / cell)).astype(int)[::-1])
+    lab = np.full(shape, -1, np.int32)
+    for k, p in enumerate(rooms):
+        m = np.zeros(shape, np.uint8)
+        cv2.fillPoly(m, [np.round((np.asarray(p) - lo) / cell).astype(np.int32)], 1)
+        lab[m > 0] = k
+    # every cell takes the nearest room's label
+    dist, idx = cv2.distanceTransformWithLabels((lab < 0).astype(np.uint8), cv2.DIST_L2, 5,
+                                                labelType=cv2.DIST_LABEL_PIXEL)
+    ys, xs = np.nonzero(lab >= 0)
+    near = np.zeros(idx.max() + 1, np.int32)
+    near[idx[ys, xs]] = lab[ys, xs]
+    lab_all = near[idx]
+
+    def room_of(xy):
+        ij = np.clip(np.floor((xy - lo) / cell).astype(int), 0, np.array(shape[::-1]) - 1)
+        return lab_all[ij[:, 1], ij[:, 0]]
+
+    owner = []
+    for k in range(len(rooms)):
+        counts = []
+        for _, cams in parts:
+            c = np.array([-np.array(cm["w2c"])[:3, :3].T @ np.array(cm["w2c"])[:3, 3] for cm in cams])
+            counts.append(int((room_of(c[:, :2]) == k).sum()))
+        owner.append(int(np.argmax(counts)))
+    out = [s.subset(np.isin(room_of(s.xyz[:, :2].astype(np.float64)), [k for k, o in enumerate(owner) if o == j]))
+           for j, (s, _) in enumerate(parts)]
+    return ply.Splat.concat(out), {"owner": owner, "gaussians": [len(o) for o in out]}

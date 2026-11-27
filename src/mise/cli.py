@@ -251,6 +251,26 @@ def cmd_empty_room(args):
     print(json.dumps(rep, indent=1))
 
 
+def cmd_splat_merge(args):
+    """Splats of overlapping stretches (all trained in the scene's frame) as one: each room from
+    the stretch that stood in it most."""
+    import numpy as np
+
+    from .pipeline import ply
+    from .pipeline.empty_room import merge_splats
+    from .scene.models import Scene
+
+    d = Path(args.data) / args.scene
+    scene = Scene.model_validate_json((d / "scene.json").read_text())
+    parts = [(ply.read_ply(Path(p) / "splat.ply"), json.loads((Path(p) / "cameras.json").read_text())) for p in args.parts]
+    out, rep = merge_splats(parts, [np.array(sp.polygon, float) for sp in scene.room.spaces])
+    o = Path(args.out)
+    o.mkdir(parents=True, exist_ok=True)
+    ply.write_ply(o / "splat.ply", out)
+    (o / "cameras.json").write_text(json.dumps([c for _, cams in parts for c in cams]))
+    print(json.dumps({**rep, "parts": args.parts, "out": str(o)}, indent=1))
+
+
 def cmd_join_poses(args):
     from .pipeline.learned import join
 
@@ -289,6 +309,9 @@ def main(argv=None):
     a = sub.add_parser("splat-attach", help="make a trained splat (in the scene's frame) the scene's room splat")
     a.add_argument("scene"); a.add_argument("splat"); a.add_argument("--name", help="file name in the scene's splats/")
     a.set_defaults(fn=cmd_splat_attach)
+    a = sub.add_parser("splat-merge", help="one splat from splats of overlapping stretches, room by room")
+    a.add_argument("scene"); a.add_argument("out"); a.add_argument("parts", nargs="+", help="splat_train.py outputs")
+    a.set_defaults(fn=cmd_splat_merge)
     a = sub.add_parser("empty-room", help="the scene's home without its things, from a labelled splat")
     a.add_argument("scene"); a.add_argument("splat_dir", help="splat_train.py output: splat.ply + gauss_labels.npz")
     a.add_argument("--name", default="empty.ply"); a.add_argument("--use", action="store_true", help="make it the room splat")

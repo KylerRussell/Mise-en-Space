@@ -32,3 +32,25 @@ def test_things_go_and_the_floor_under_them_is_filled():
     assert not (in_hole & (z > 0.1)).any()  # no bed left
     assert (in_hole & (np.abs(z) < 0.05)).sum() > 0.5 * 8000 / 12 * 1.3 * 0.8  # floor copied in
     assert (x < 5).all()  # nothing from beyond the room
+
+
+def test_each_room_comes_from_the_stretch_that_stood_in_it():
+    from mise.pipeline.empty_room import merge_splats
+
+    rng = np.random.default_rng(1)
+    rooms = [np.array([(0, 0), (3, 0), (3, 3), (0, 3)], float), np.array([(3.1, 0), (6, 0), (6, 3), (3.1, 3)], float)]
+    pts = np.c_[rng.uniform(-0.5, 6.5, (4000, 2)), rng.uniform(0, 2.4, 4000)]
+
+    def cams_at(xs):  # cameras standing at (x, 1.5), looking along +y: w2c with center c
+        out = []
+        for x in xs:
+            c = np.array([x, 1.5, 1.5])
+            R = np.eye(3)
+            out.append({"w2c": np.r_[np.c_[R, -R @ c], [[0, 0, 0, 1]]].tolist()})
+        return out
+    a = (_splat(pts, np.full((len(pts), 3), 0.2)), cams_at([1.0, 1.5, 2.0, 4.0]))  # mostly in the left room
+    b = (_splat(pts, np.full((len(pts), 3), 0.8)), cams_at([4.5, 5.0, 5.5, 1.0]))  # mostly in the right one
+    out, rep = merge_splats([a, b], rooms)
+    assert rep["owner"] == [0, 1] and len(out) == len(pts)
+    left = out.xyz[:, 0] < 3.0
+    assert np.allclose(out.rgb()[left], 0.2, atol=1e-3) and np.allclose(out.rgb()[~left & (out.xyz[:, 0] > 3.2)], 0.8, atol=1e-3)

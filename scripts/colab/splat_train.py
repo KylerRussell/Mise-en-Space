@@ -152,9 +152,11 @@ def main(argv=None) -> None:
     ap.add_argument("--holdout", type=int, default=8, help="every Nth frame is held out for the PSNR check")
     ap.add_argument("--max-init", type=int, default=600000)
     ap.add_argument("--pose-opt", type=float, default=1e-4, help="learning rate of the camera corrections (0: off)")
-    ap.add_argument("--color-opt", type=float, default=1e-3, help="learning rate of the per-frame color correction (0: off)")
-    ap.add_argument("--refine-stop", type=float, default=0.6, help="share of the steps that densify")
-    ap.add_argument("--grow-grad", type=float, default=0.0005, help="densify where the 2D gradient is above this")
+    ap.add_argument("--color-opt", type=float, default=0.0, help="learning rate of the per-frame color correction (0: off)")
+    ap.add_argument("--refine-stop", type=float, default=0.5, help="share of the steps that densify")
+    ap.add_argument("--grow-grad", type=float, default=0.0008, help="densify where the 2D gradient is above this")
+    ap.add_argument("--depth-weight", type=float, default=0.1,
+                    help="pull rendered depth toward the solve's depth maps (depth.npz) by this much (0: off)")
     ap.add_argument("--labels", type=Path, help="segment_frames.py output: label every Gaussian by vote")
     ap.add_argument("--world", help='JSON {"scale": s, "R": 3x3, "t": 3}: train in the frame scale * R @ x + t')
     a = ap.parse_args(argv)
@@ -198,6 +200,22 @@ def main(argv=None) -> None:
         K[:2] /= ds
         Ks.append(K)
         w2cs.append(im["w2c"])
+    # the learned model's depth for each frame (solve units; scaled with the world): keeps
+    # Gaussians on the surfaces, where plain walls and tight closets give the colors little hold
+    dmaps = None
+    if a.depth_weight > 0 and (a.solve / "depth.npz").exists():
+        dz = np.load(a.solve / "depth.npz")
+        at = {str(nm): k for k, nm in enumerate(dz["names"])}
+        sc_d = float(json.loads(a.world)["scale"]) if a.world else 1.0
+        dl, cl = [], []
+        for im in images:
+            k = at.get(im["name"])
+            dl.append(dz["depth"][k].astype(np.float32) * sc_d if k is not None else np.zeros(dz["depth"].shape[1:], np.float32))
+            cl.append(dz["conf"][k].astype(np.float32) if k is not None else np.zeros(dz["conf"].shape[1:], np.float32))
+        dmaps = torch.tensor(np.array(dl), device=dev)
+        cmaps = torch.tensor(np.array(cl), device=dev)
+        cthr = torch.quantile(cmaps[cmaps > 0][::97], 0.3)  # the least sure 30% of depth left out
+        print(f"[splat] depth maps {tuple(dmaps.shape)}, weight {a.depth_weight}", flush=True)
     Ks = torch.tensor(np.array(Ks), dtype=torch.float32, device=dev)
     w2cs = torch.tensor(np.array(w2cs), dtype=torch.float32, device=dev)
     n = len(imgs)
@@ -254,12 +272,12 @@ def main(argv=None) -> None:
         D[:, :3, 3] = dt[idx]
         return D @ w2cs[idx]
 
-    def render(idx, sh_degree):
+    def render(idx, sh_degree, depth=False):
         out, alpha, info = rasterization(
             params["means"], F.normalize(params["quats"], dim=-1), torch.exp(params["scales"]),
             torch.sigmoid(params["opacities"]), torch.cat([params["sh0"], params["shN"]], 1),
             viewmat(idx), Ks[idx], Ww, Hh, sh_degree=sh_degree, packed=False, absgrad=True,
-            near_plane=0.01, far_plane=100.0)
+            near_plane=0.01, far_plane=100.0, render_mode="RGB+ED" if depth else "RGB")
         return out, alpha, info
 
     rng = np.random.default_rng(0)
@@ -267,11 +285,16 @@ def main(argv=None) -> None:
     for step in range(a.steps):
         i = int(rng.choice(train))
         sh_degree = min(step // 1000, a.sh)
-        out, alpha, info = render([i], sh_degree)
+        out, alpha, info = render([i], sh_degree, depth=dmaps is not None)
         gt = imgs[i].float()[None] / 255.0
         pred = colored(out[..., :3], i)
         l1 = (pred - gt).abs().mean()
         loss = 0.8 * l1 + 0.2 * (1 - ssim(pred.permute(0, 3, 1, 2), gt.permute(0, 3, 1, 2)))
+        if dmaps is not None:
+            rd = F.interpolate(out[..., 3:4].permute(0, 3, 1, 2), size=dmaps.shape[1:], mode="area")[0, 0]
+            td, ok = dmaps[i], (cmaps[i] >= cthr) & (dmaps[i] > 0.05)
+            if ok.any():
+                loss = loss + a.depth_weight * ((rd[ok] - td[ok]).abs() / td[ok]).mean()
         strategy.step_pre_backward(params, opt, state, step, info)
         loss.backward()
         for o in opt.values():
