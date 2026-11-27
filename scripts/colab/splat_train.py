@@ -313,10 +313,16 @@ def main(argv=None) -> None:
             mse = ((colored(out[..., :3], i) - imgs[i].float()[None] / 255.0) ** 2).mean()
             psnr_train.append(float(-10 * torch.log10(mse)))
         psnr = []
-        for i in test:
+        (a.out / "renders").mkdir(exist_ok=True)
+        for k, i in enumerate(test):
             out, _, _ = render([i], a.sh)
-            mse = ((colored(out[..., :3], i) - imgs[i].float()[None] / 255.0) ** 2).mean()
+            pred = colored(out[..., :3], i)
+            mse = ((pred - imgs[i].float()[None] / 255.0) ** 2).mean()
             psnr.append(float(-10 * torch.log10(mse)))
+            if k % max(1, len(test) // 8) == 0:  # a few held-out frames: photo | render
+                pair = torch.cat([imgs[i].float() / 255.0, pred[0]], 1).clamp(0, 1)
+                Image.fromarray((pair.cpu().numpy() * 255).astype(np.uint8)).resize((Ww, Hh // 2)).save(
+                    a.out / "renders" / f"{images[i]['name'][:-4]}_{psnr[-1]:.1f}.jpg", quality=85)
         sh = torch.cat([params["sh0"], params["shN"]], 1)
         write_ply(a.out / "splat.ply", params["means"].cpu().numpy(),
                   sh[:, 0].cpu().numpy(),
