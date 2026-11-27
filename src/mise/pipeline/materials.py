@@ -221,29 +221,36 @@ def classify(patch: np.ndarray, kind: str, px_per_m: int = 400) -> dict:
     return out
 
 
-def block_evidence(patch: np.ndarray, px_per_m: int = 400) -> bool:
-    """Painted concrete block: horizontal joints repeating at one course (8 in, 0.19-0.22 m).
-    Joints span the row, so the row profile is the median across it of the vertical gradient."""
+def block_evidence(patch: np.ndarray, px_per_m: int = 400) -> float:
+    """Painted concrete block: horizontal joints repeating at one course (8 in, 0.19-0.225 m).
+    Joints span the row, so the row profile is the median across it of the vertical gradient.
+    Returns how strongly the patch repeats at that course (0: not at all)."""
     import cv2
 
     g = patch.mean(-1).astype(np.float32)
     flat = g / np.maximum(cv2.GaussianBlur(g, (0, 0), 24), 1e-3)
     gy = np.abs(cv2.Sobel(cv2.GaussianBlur(flat, (0, 0), 1.2), cv2.CV_32F, 0, 1))
     per, strength = _period(np.median(gy, axis=1), px_per_m, 0.15, 0.26)
-    return per is not None and 0.19 <= per <= 0.22 and strength >= 0.33
+    return float(strength) if per is not None and 0.19 <= per <= 0.225 else 0.0
 
 
-def block_hits(s: dict, cell: float, cameras, frames_dir, labels, classes, depth, k: int = 6) -> tuple[int, np.ndarray | None]:
-    """How many of up to k patches spread over a wall look like painted block (one alone can be a
-    door frame or a hanger; two or more is the wall), and the best such patch."""
-    hits, best = 0, (None, 0.0)
+BLOCK_BEST, BLOCK_SECOND = 0.40, 0.24  # set on the home's walls in two runs: block 0.41-0.51 / 0.25-0.46,
+# drywall at most 0.39 alone or 0.30 / 0.22
+
+
+def block_hits(s: dict, cell: float, cameras, frames_dir, labels, classes, depth, k: int = 12) -> tuple[bool, list, np.ndarray | None]:
+    """Is this wall painted block? Up to k patches spread over it; most views of a wall are too far,
+    blurred or half hidden to show joints, so it takes one clear view of the course and a second
+    that agrees (one alone can be a door frame or a hanger). Returns (block, strengths, best patch)."""
+    found = []
     for c, side in clear_patches(s, cell, size_m=0.5, k=k):
-        p, sc = sample_patch(s, c, side, cell, cameras, frames_dir, labels, classes, depth, with_score=True)
-        if p is not None and block_evidence(p):
-            hits += 1
-            if sc > best[1]:
-                best = (p, sc)
-    return hits, best[0]
+        p = sample_patch(s, c, side, cell, cameras, frames_dir, labels, classes, depth)
+        if p is not None:
+            found.append((block_evidence(p), p))
+    found.sort(key=lambda t: -t[0])
+    st = [round(e, 2) for e, _ in found]
+    block = len(st) >= 2 and st[0] >= BLOCK_BEST and st[1] >= BLOCK_SECOND
+    return block, st[:3], (found[0][1] if found else None)
 
 
 def _texture(kind: str, patch: np.ndarray | None, color: str, info: dict, out_path: Path) -> tuple[str | None, float]:
@@ -350,8 +357,8 @@ def estimate(scene, surfaces: list[dict], cell: float, cameras: list[dict], fram
                         continue
                     col = np.clip(col * gain, 0, 1)
                     d_ab = float(np.linalg.norm(_lab(col)[0][1:] - base[1:]))
-                    hits, patch = block_hits(s, cell, cameras, frames_dir, labels, classes, depth)
-                    kind = "block" if hits >= 2 else "paint"
+                    is_block, hits, patch = block_hits(s, cell, cameras, frames_dir, labels, classes, depth)
+                    kind = "block" if is_block else "paint"
                     if d_ab > 6.0 or kind != f.walls.kind:  # another paint, or painted block
                         hexc = _hex(col)
                         info = {"module_m": 0.203}

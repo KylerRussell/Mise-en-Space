@@ -276,11 +276,16 @@ material x shading looks as captured, and `mise shell-render SCENE` rebuilds it 
 in about a second after a repaint or a new floor (`--flat` without the light). The photo-painted
 version stays as `splats/empty_photo.ply`. On the home: one laminate floor (wood, boards along
 y, #b6aea3), one wall paint (#c2bdb7; the walk-in's walls warmer), one ceiling. Painted block is read
-off up to six patches per wall: horizontal joints repeating at one 8 in course (0.19-0.22 m,
-strength >= 0.33, the row profile being the median across the row of the vertical gradient, so
-an object doesn't count); two hits make the wall block (one can be a door frame or hanger). Found
-the three exterior block walls (main room behind the desk, walk-in, bedroom), drawn at 1.25 cm
-so the joints show, meeting the drywall at the corners as in the photos.
+off up to twelve patches per wall: horizontal joints repeating at one 8 in course (0.19-0.225 m;
+the row profile is the median across the row of the vertical gradient, so an object doesn't
+count). Most views of a wall are too far, blurred or half hidden to show joints, and averaging
+them drowns the few that do, so a wall is block when its clearest patch repeats at >= 0.40 and a
+second agrees at >= 0.24 (`BLOCK_BEST`, `BLOCK_SECOND`, set on this home's walls in two runs:
+block 0.41-0.51 / 0.25-0.46, drywall at most 0.39 alone or 0.30 / 0.22). Finds the three
+exterior block walls (main room behind the desk, walk-in, bedroom) in both runs, drawn at 1.25
+cm so the joints show, meeting the drywall at the corners as in the photos. The desk wall is the
+marginal one (second patch 0.25 in the second run): it is mostly behind the desk, screens and
+curtains.
 
 Trim, windows and doors (`trim.py`): the frames' labels vote on every wall point; where most
 views see window pane or blind it is window, door (or a mirrored closet door reaching the floor)

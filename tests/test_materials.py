@@ -58,3 +58,16 @@ def test_repainting_changes_the_walls_and_keeps_the_light(tmp_path):
     assert r > 2 * g and abs(rgb2[high].mean(0)[0] - _rgb("#c04040")[0] * 0.97) < 0.08
     floor = np.abs(X[:, 2]) < 0.01
     assert np.allclose(rgb2[floor], rgb[floor])  # the floor untouched
+
+
+def test_block_joints_are_told_from_plain_paint():
+    from mise.pipeline.materials import block_evidence
+
+    rng = np.random.default_rng(1)
+    px = 400
+    y = np.arange(200)[:, None] / px  # a 0.5 m patch
+    plain = 0.75 + 0.02 * rng.standard_normal((200, 200, 1)).repeat(3, -1)
+    joints = plain.copy()
+    joints[(np.mod(y[:, 0], 0.2032) < 0.008)] -= 0.08  # 8 in courses, faint as painted-over joints are
+    assert block_evidence(joints.astype(np.float32)) >= 0.4
+    assert block_evidence(plain.astype(np.float32)) < 0.24
