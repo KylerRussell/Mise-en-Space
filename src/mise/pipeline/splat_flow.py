@@ -131,7 +131,11 @@ def splat_home(scene_dir: Path, work: Path, solve: Path, frames_dir: Path, scan_
     empty = empty_scene(scene_dir, md, "empty.ply", semantic, frames=frames_dir,
                         depth=refined / "depth.npz" if (refined / "depth.npz").exists() else None,
                         depth_scale=float(scene_from["scale"]), say=say)
-    report = {"windows": [{"room": scene.room.spaces[r].name, "t": [round(a, 1), round(b, 1)], "frames": n,
+    from .objects import add_scanned_objects
+
+    objs = add_scanned_objects(scene_dir, md)  # empty_scene labelled the merged splat
+    say(f"{objs['objects']} objects ({objs['fixtures']} fixtures): " + ", ".join(f"{k} {v}" for k, v in objs["by_kind"].items()))
+    report = {"objects": {k: v for k, v in objs.items() if k != "list"}, "windows": [{"room": scene.room.spaces[r].name, "t": [round(a, 1), round(b, 1)], "frames": n,
                            "psnr_held_out": m.get("psnr_held_out"), "psnr_train": m.get("psnr_train"),
                            "gaussians": m.get("gaussians")} for (r, a, b, n), m in zip(visits, scores)],
               "merge": rep, "empty": empty, "splat": "splats/home.ply"}

@@ -286,6 +286,14 @@ def cmd_splat_home(args):
     print(json.dumps(rep, indent=1, default=float))
 
 
+def cmd_scan_objects(args):
+    """The things in a labelled splat as movable objects in the scene (fixtures marked)."""
+    from .pipeline.objects import add_scanned_objects
+
+    rep = add_scanned_objects(Path(args.data) / args.scene, Path(args.splat_dir))
+    print(json.dumps(rep, indent=1, default=float))
+
+
 def cmd_splat_merge(args):
     """Splats of overlapping stretches (all trained in the scene's frame) as one: each room from
     the stretch that stood in it most."""
@@ -355,6 +363,9 @@ def main(argv=None):
     a.add_argument("solve"); a.add_argument("frames", help="the picked frames (with intrinsics.json)")
     a.add_argument("out"); a.add_argument("--work", help="scratch folder (default OUT-work)")
     a.set_defaults(fn=cmd_refine_poses)
+    a = sub.add_parser("scan-objects", help="the things in a labelled splat as movable objects (after empty-room labels it)")
+    a.add_argument("scene"); a.add_argument("splat_dir", help="splat.ply + gauss_labels.npz")
+    a.set_defaults(fn=cmd_scan_objects)
     a = sub.add_parser("splat-merge", help="one splat from splats of overlapping stretches, room by room")
     a.add_argument("scene"); a.add_argument("out"); a.add_argument("parts", nargs="+", help="splat_train.py outputs")
     a.set_defaults(fn=cmd_splat_merge)

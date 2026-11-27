@@ -253,6 +253,20 @@ point counts as unseen and is filled: floors with the nearest same-size patch of
 then a broad blur; walls with a broad blur of the wall around; ceilings one smooth color.
 Doorways stay open. On the home: walls 59% seen, 28% behind things; floors 54% / 40%.
 
+The things come back as movable objects (`objects.py`, `mise scan-objects`, run by `splat-home`):
+the owner's call (2026-11-27) is that furniture is removed and re-added as separate movable 3D
+objects, so its reconstruction only has to be recognizable; what matters is each one's kind,
+footprint, height and heading. Labelled Gaussians are grouped by kind (a bed with its pillows,
+a desk, screens, storage, chairs...), split into instances by connected footprint within each
+room (never across a wall), boxed (yaw only), and written as `objects/<id>.ply` in their own
+frame. What lies on or in them (clothes on a bed) goes with them; what starts below 45 cm stands
+on the floor (thin legs are seldom labelled); a screen on a desk is supported by the desk.
+Kitchen and bath pieces are fixtures, named by their main class (a sink or counter in a room
+with a toilet is a vanity); cabinets beside the kitchen join it. Clutter (clothes, bottles,
+towels, books) and curtains don't become objects. On the home: 27 objects, 7 of them fixtures;
+the bed, desk with its screens, sofa, chairs, kitchen run and island, toilet and vanity all
+where they are in the photos. Smaller mislabels remain (built-in closet shelving as "Cabinets").
+
 Known limits of the shell: fixtures go with the furniture (kitchen cabinets, counters); the main
 room's bulkhead isn't in the layout; patches of floor differ in shade where copied; where the
 outline stands short of the wall (the main room's 4.88 m span) that wall is mostly fill.
@@ -266,10 +280,11 @@ retried, and can render splats from given cameras (`--render A.ply B.ply --camer
 1. Stage 1 loose ends: the main room's 4.88 m span (-6%: the outline stops at the desk), the
    closets peeked into from outside (bedroom closet 0.34, entry closet missed), doorway widths
    0.7 m for ~0.8 m. The shell inherits these.
-2. The empty home's fixtures: keep the kitchen run and bath as their own pieces (labelled
-   Gaussians, or simple boxes painted like the shell), and the bulkhead as part of the layout.
-3. Splat sharpness where a room is only seen through an opening: windows by room *and* by
-   what each frame looks at, or a second pass on the merged splat with all frames.
+2. Fixtures show in the empty home only as scanned objects (`fixture: true`); the shell itself
+   has no kitchen. The bulkhead belongs in the layout.
+3. Objects: swap scanned objects for catalog products of the same kind and size; check
+   headings (front faces away from the wall it stands against). Splat sharpness of furniture
+   doesn't matter (it is re-added as objects); the shell's does.
 4. Wire `splat-home` onto the end of `learned-scan` (flag) once the above settles.
 5. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
 
