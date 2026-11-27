@@ -51,6 +51,25 @@ def remote(session: str, code: str, timeout: float = 120) -> str:
     return colab("exec", "-s", session, "--timeout", str(timeout), stdin=code, timeout=timeout + 60)
 
 
+def _base_colour(src: Path, dst: Path) -> Path:
+    """A copy of a Gaussian splat .ply without its f_rest_* (view-dependent colour) properties."""
+    import numpy as np
+    with open(src, "rb") as fh:
+        head = b""
+        while not head.endswith(b"end_header\n"):
+            head += fh.readline()
+        lines = head.splitlines()
+        props = [ln.split()[-1].decode() for ln in lines if ln.startswith(b"property")]
+        n = int(next(ln for ln in lines if ln.startswith(b"element vertex")).split()[-1])
+        data = np.frombuffer(fh.read(), dtype=np.float32, count=n * len(props)).reshape(n, len(props))
+    keep = [i for i, q in enumerate(props) if not q.startswith("f_rest_")]
+    hdr = [ln for ln in lines if not (ln.startswith(b"property") and ln.split()[-1].startswith(b"f_rest_"))]
+    with open(dst, "wb") as fh:
+        fh.write(b"\n".join(hdr) + b"\n")
+        fh.write(np.ascontiguousarray(data[:, keep]).tobytes())
+    return dst
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("name", help="run name: session mise-NAME, outputs in data/scans/learned/NAME")
@@ -66,16 +85,26 @@ def main(argv=None) -> None:
     ap.add_argument("--keep", action="store_true", help="leave the VM running afterwards")
     ap.add_argument("--out", type=Path, help="default: data/scans/learned/NAME (data/scans/splats/NAME with --splat)")
     ap.add_argument("--splat", type=Path, help="train a splat on this solve's frames instead (splat_train.py)")
+    ap.add_argument("--render", type=Path, nargs="+", help="splat .ply files to render side by side (render_splat.py)")
+    ap.add_argument("--cameras", type=Path, help="with --render: cameras.json (from splat_train.py)")
+    ap.add_argument("--names", nargs="*", help="with --render: frames to render (default 8 spread over the cameras)")
     ap.add_argument("--segment", action="store_true", help="label the frames' pixels instead (segment_frames.py)")
     ap.add_argument("--labels", type=Path, help="with --splat: segment_frames.py output, to label every Gaussian")
     ap.add_argument("--scene-from", type=Path, help="with --splat: a scan's result.json; train in that scene's frame")
     a, extra = ap.parse_known_args(argv)  # anything else goes to the remote script (--chunk, --steps, ...)
     session = f"mise-{a.name}"
-    kind = "splats" if a.splat else "semantic" if a.segment else "learned"
+    kind = "renders" if a.render else "splats" if a.splat else "semantic" if a.segment else "learned"
     out = a.out or Path("data/scans") / kind / a.name
-    script = {"splats": "splat_train.py", "semantic": "segment_frames.py", "learned": "learned_recon.py"}[kind]
+    script = {"splats": "splat_train.py", "semantic": "segment_frames.py", "learned": "learned_recon.py",
+              "renders": "render_splat.py"}[kind]
+    if a.render:  # the frames to look from
+        cams = json.loads(a.cameras.read_text())
+        names = a.names or [cams[i]["name"] for i in [round(k * (len(cams) - 1) / 7) for k in range(8)]]
+        a.names = names
 
     kept = json.loads((a.frames / "frames.json").read_text())
+    if a.render:
+        kept = [k for k in kept if k["name"] in set(a.names)]
     if a.splat:  # the frames the solve has
         names = {k["name"] for k in json.loads((a.splat / "frames.json").read_text())}
         kept = [k for k in kept if k["name"] in names]
@@ -101,7 +130,16 @@ def main(argv=None) -> None:
                 for f in ("labels.npz", "meta.json"):
                     tar.add(a.labels / f, f"in/labels/{f}")
 
-    if a.segment:
+        if a.render:  # base colour only (no view-dependent terms): a quarter of the size, enough to look
+            for k, pth in enumerate(a.render):
+                tar.add(_base_colour(pth, tmp / f"splat_{k}.ply"), f"in/splat_{k}.ply")
+            tar.add(a.cameras, "in/cameras.json")
+
+    if a.render:
+        args = ["--splats", *[f"/content/in/splat_{k}.ply" for k in range(len(a.render))], "--cameras",
+                "/content/in/cameras.json", "--frames", "/content/in/frames", "--out", "/content/out",
+                "--names", *a.names, *extra]
+    elif a.segment:
         args = ["--frames", "/content/in", "--out", "/content/out", *extra]
     elif a.splat:
         args = ["--frames", "/content/in", "--solve", "/content/in/solve", "--out", "/content/out", *extra]
@@ -151,9 +189,22 @@ def main(argv=None) -> None:
                     if attempt == 3:
                         raise
                     time.sleep(30)
-        remote(session, "import subprocess; subprocess.run('cat /content/in.tgz.[0-9]* > /content/in.tgz && "
-                        "rm /content/in.tgz.[0-9]*', shell=True, check=True)", timeout=300)
-        colab("upload", "-s", session, str(HERE / script), f"/content/{script}", timeout=300)
+        join = ("import glob, subprocess\n"  # safe to run again: once joined, the pieces are gone
+                "if glob.glob('/content/in.tgz.[0-9]*'):\n"
+                "    subprocess.run('cat /content/in.tgz.[0-9]* > /content/in.tgz.tmp && mv /content/in.tgz.tmp "
+                "/content/in.tgz && rm /content/in.tgz.[0-9]*', shell=True, check=True)\n")
+        for attempt in range(4):
+            try:
+                remote(session, join, timeout=300)
+                break
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                print(f"  (joining the pieces, attempt {attempt + 1}, failed: {str(e).strip().splitlines()[-1][-120:]})",
+                      flush=True)
+                if attempt == 3:
+                    raise
+                time.sleep(30)
+        for scr in {script, "splat_train.py"} if a.render else {script}:  # render_splat uses splat_train's install
+            colab("upload", "-s", session, str(HERE / scr), f"/content/{scr}", timeout=300)
         start = f"""
 import os, subprocess, shlex, sys
 if os.path.exists("/content/run.sh"):  # an earlier attempt got this far: don't start a second job
@@ -195,7 +246,7 @@ print("@@EXIT@@", open("/content/exit_code").read().strip() if os.path.exists("/
             log, _, tail = text.rpartition("@@EXIT@@")
             lines = log.rstrip("\n").splitlines()
             for line in lines[seen:]:
-                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line or "[splat]" in line or "[seg]" in line or 'File "' in line:
+                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line or "[splat]" in line or "[seg]" in line or "[render]" in line or 'File "' in line:
                     print("  " + line[-300:], flush=True)
             seen = len(lines)
             code = int(tail.strip()) if tail.strip() else None

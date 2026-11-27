@@ -154,6 +154,19 @@ MapAnything). `--model` takes `mapanything`, `vggt`, `pi3`, `pi3x`, `da3`, `da3_
 `python -m mise.eval.floorplan PLAN --room R LABEL=SOLVE [--box CLICKS]` scores a solve against a
 floor plan (and a reference object of known size).
 
+**Splat and empty home (Colab GPU).** After a learned scan:
+
+```bash
+mise splat-home my-flat        # splats/home.ply (the home as filmed) and splats/empty.ply (its shell)
+```
+
+It bundle-adjusts the cameras, trains one Gaussian splat per room visit on concurrent Colab
+sessions (depth from the model as a guide, each camera learning a small correction), and joins
+them room by room. The empty home is the traced layout's walls, floors and ceilings painted from
+the photos where nothing stood in front of them, and filled from around where something did.
+The parts: `mise refine-poses`, `run_learned_recon.py NAME --splat SOLVE`, `mise splat-merge`,
+`mise empty-room`.
+
 ## Scan to scene with splats (once you have a capture)
 
 ```bash

@@ -214,25 +214,64 @@ bathroom 0.91, walk-in 0.89, bedroom closet 0.33 (mirrored doors; on solve dc4 t
 reflection happened to carve the closet and scored 0.63), entry closet missed; 5 rooms,
 4 doorways, no phantom; scene scale x0.999 of the plan, walls 5.5 cm off.
 
-## Stage 2: splats (started 2026-11-27)
+## Stage 2: splats and the empty home (2026-11-27)
 
-`scripts/colab/splat_train.py` (gsplat, plain 3DGS with its default densification) trains on the
-picked frames and a solve: `run_learned_recon.py NAME --splat SOLVE --frames PICKED
---scene-from SCAN/result.json` trains in the scene's frame (the scan records
-`scene_from_solve`), so `mise splat-attach SCENE splat.ply` just copies it in. 30k steps over
-the whole tour take ~10 min on an A100. Depth Anything 3's cameras are a few cm / ~1 deg off,
-which blurred the first home splat (held-out PSNR 16; 26 on a 40 s stretch), so each camera
-now learns a small correction during training, and held-out cameras are aligned to the
-finished splat before scoring. Bundle adjustment on SIFT from the model's poses (CPU) was tried
-and dropped: on the plain bedroom it moved cameras 17 cm / 6 deg, more than the model's error.
+One command after the learned scan: `mise --data DATA splat-home SCENE` (paths as `learned-scan`
+lays them out; `--solve/--frames/--scan-result/--semantic/--refined` override). It:
+
+1. Bundle-adjusts the learned cameras on SIFT (CPU, `mise refine-poses`; `learned.refine_poses`).
+2. Splits the tour into room visits (cameras placed in the scene's rooms; glances back through a
+   door folded in) and trains one splat per visit on Colab, side by side, each window running
+   5 s into the rooms either side (`splat_flow.room_visits`).
+3. Merges them: each room from the window whose cameras stood in it, a room nobody stood in
+   (a closet looked into) from the window that came closest (`empty_room.merge_splats`).
+4. Writes `splats/home.ply` (the room's splat) and `splats/empty.ply` (the empty home).
+
+What it took to get sharp splats (held-out PSNR; renders saved beside the photos):
+
+| | whole tour | room windows |
+|---|---|---|
+| model cameras, 30k steps | 17-22 | 20-24 |
+| one splat, 90k steps, 1.1M Gaussians | 17.7 (train 19.4) | |
+| bundle-adjusted cameras + depth loss + camera corrections | | **25.8-27.7** |
+
+A whole-tour splat can't even fit its own frames however long it trains; a 40 s stretch scores
+30. The depth loss (rendered depth pulled toward the model's depth maps, confident pixels, weight
+0.1) is what stops floaters in the plain small rooms (closets/bath 20.2 -> 23.8, with camera
+corrections 25.4). Per-frame color correction cost 1-3 dB and is off. Weak spots: what is only
+seen through an opening or from a doorway is smeared, and the main room's 435 frames is about as
+many as one window handles well.
+
+The empty home is the layout's shell painted from the photos (`shell.py`), not the splat with
+things cut out: a splat's plain walls are 20-30 cm thick and tangled with what stands against
+them, so no cut at the wall separates the two (tried: `empty_room.empty_room`, kept as the
+fallback). The shell is flat Gaussians every 2.5 cm on each wall, floor and ceiling of the
+traced rooms; each point takes the robust mean color of the frames that see it as that kind of
+surface (labels eroded at outlines, the model's depth agreeing within ~6%, near square-on views
+counting most). Where the labelled splat has things in front of a wall or above a floor, the
+point counts as unseen and is filled: floors with the nearest same-size patch of seen floor,
+then a broad blur; walls with a broad blur of the wall around; ceilings one smooth color.
+Doorways stay open. On the home: walls 59% seen, 28% behind things; floors 54% / 40%.
+
+Known limits of the shell: fixtures go with the furniture (kitchen cabinets, counters); the main
+room's bulkhead isn't in the layout; patches of floor differ in shade where copied; where the
+outline stands short of the wall (the main room's 4.88 m span) that wall is mostly fill.
+
+The Colab launcher sends inputs in 40 MB pieces (one region refused ~90 MB in one request), each
+retried, and can render splats from given cameras (`--render A.ply B.ply --cameras cameras.json`,
+`render_splat.py`).
 
 ## Next steps
 
-1. Stage 1 loose ends: the closets peeked into from outside (bedroom closet 0.34, entry closet
-   missed); the main room's 4.88 m span (+-6%); doorway widths 0.7 m for ~0.8 m.
-2. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
-3. Stage 2: the empty room: Gaussians on things (from the frame labels) out, floor and walls filled.
-4. Rebuild the bedroom, closets and bathroom of `my-apartment` from the learned home.
+1. Stage 1 loose ends: the main room's 4.88 m span (-6%: the outline stops at the desk), the
+   closets peeked into from outside (bedroom closet 0.34, entry closet missed), doorway widths
+   0.7 m for ~0.8 m. The shell inherits these.
+2. The empty home's fixtures: keep the kitchen run and bath as their own pieces (labelled
+   Gaussians, or simple boxes painted like the shell), and the bulkhead as part of the layout.
+3. Splat sharpness where a room is only seen through an opening: windows by room *and* by
+   what each frame looks at, or a second pass on the merged splat with all frames.
+4. Wire `splat-home` onto the end of `learned-scan` (flag) once the above settles.
+5. Coaching: circle the box and look up at each doorway head for a second (both feed the scale).
 
 ## Smaller open items
 

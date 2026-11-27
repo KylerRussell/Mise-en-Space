@@ -243,12 +243,47 @@ def cmd_empty_room(args):
     from .scene.models import Scene
 
     d = Path(args.data) / args.scene
-    rep = empty_scene(d, Path(args.splat_dir), args.name, Path(args.semantic) if args.semantic else None)
+    scale = 1.0
+    if args.scan_result:
+        ref = next(pc for pc in json.loads(Path(args.scan_result).read_text())["pieces"] if pc.get("scene_from_solve"))
+        scale = float(ref["scene_from_solve"]["scale"])
+    rep = empty_scene(d, Path(args.splat_dir), args.name, Path(args.semantic) if args.semantic else None,
+                      frames=Path(args.frames) if args.frames else None, depth=Path(args.depth) if args.depth else None,
+                      depth_scale=scale)
     if args.use:
         scene = Scene.model_validate_json((d / "scene.json").read_text())
         scene.room.splat = rep["path"]
         (d / "scene.json").write_text(scene.model_dump_json(indent=2))
     print(json.dumps(rep, indent=1))
+
+
+def cmd_refine_poses(args):
+    """Bundle-adjust a learned solve's cameras (CPU) for splat training; depth maps carried along."""
+    import shutil
+
+    from .pipeline.learned import refine_poses
+
+    solve, out = Path(args.solve), Path(args.out)
+    rep = refine_poses(solve, Path(args.frames), Path(args.work or str(out) + "-work"), out)
+    for f in ("depth.npz", "frames.json"):  # splat_train's depth loss; the launcher's frame list
+        if (solve / f).exists() and not (out / f).exists():
+            shutil.copy2(solve / f, out / f)
+    print(json.dumps(rep, indent=1))
+
+
+def cmd_splat_home(args):
+    """The scene's splat and its empty room from a learned scan (paths as learned-scan lays them out)."""
+    from .pipeline.splat_flow import splat_home
+
+    work = Path(args.work or Path(args.data).parent / "scans" / args.scene)
+    lr = work / "learned-run"
+    sem = Path(args.semantic) if args.semantic else lr / "learned" / "semantic"
+    rep = splat_home(Path(args.data) / args.scene, work, Path(args.solve or lr / "learned" / "home"),
+                     Path(args.frames or lr / "picked"), Path(args.scan_result or work / "result.json"),
+                     semantic=sem if (sem / "labels.npz").exists() else None,
+                     refined=Path(args.refined) if args.refined else None, gpu=args.gpu, tag=args.scene,
+                     say=lambda m: print(f"[splat] {m}", flush=True))
+    print(json.dumps(rep, indent=1, default=float))
 
 
 def cmd_splat_merge(args):
@@ -309,6 +344,17 @@ def main(argv=None):
     a = sub.add_parser("splat-attach", help="make a trained splat (in the scene's frame) the scene's room splat")
     a.add_argument("scene"); a.add_argument("splat"); a.add_argument("--name", help="file name in the scene's splats/")
     a.set_defaults(fn=cmd_splat_attach)
+    a = sub.add_parser("splat-home", help="the scene's splat (room by room on Colab) and its empty room, from a learned scan")
+    a.add_argument("scene")
+    a.add_argument("--work", help="the scan's folder (default ../scans/SCENE, as learned-scan makes it)")
+    a.add_argument("--solve"); a.add_argument("--frames"); a.add_argument("--scan-result")
+    a.add_argument("--semantic"); a.add_argument("--refined", help="cameras already bundle-adjusted (refine-poses)")
+    a.add_argument("--gpu", default="A100,G4,L4,H100")
+    a.set_defaults(fn=cmd_splat_home)
+    a = sub.add_parser("refine-poses", help="bundle-adjust a learned solve's cameras for splat training (CPU)")
+    a.add_argument("solve"); a.add_argument("frames", help="the picked frames (with intrinsics.json)")
+    a.add_argument("out"); a.add_argument("--work", help="scratch folder (default OUT-work)")
+    a.set_defaults(fn=cmd_refine_poses)
     a = sub.add_parser("splat-merge", help="one splat from splats of overlapping stretches, room by room")
     a.add_argument("scene"); a.add_argument("out"); a.add_argument("parts", nargs="+", help="splat_train.py outputs")
     a.set_defaults(fn=cmd_splat_merge)
@@ -316,6 +362,9 @@ def main(argv=None):
     a.add_argument("scene"); a.add_argument("splat_dir", help="splat_train.py output: splat.ply + gauss_labels.npz")
     a.add_argument("--name", default="empty.ply"); a.add_argument("--use", action="store_true", help="make it the room splat")
     a.add_argument("--semantic", help="frame labels (segment_frames.py): label the Gaussians here, with the trained cameras")
+    a.add_argument("--frames", help="the picked frames: paint the layout's shell from them (with --depth)")
+    a.add_argument("--depth", help="the solve's depth.npz (the model's depth maps)")
+    a.add_argument("--scan-result", help="the scan's result.json: the depth maps' scale to the scene")
     a.set_defaults(fn=cmd_empty_room)
     a = sub.add_parser("package"); a.add_argument("splat"); a.add_argument("labels", help="labels.npy, one int per Gaussian")
     a.add_argument("out"); a.add_argument("--names", help="JSON {label: {id, name, category}}"); a.add_argument("--openings", help="JSON list of openings")
