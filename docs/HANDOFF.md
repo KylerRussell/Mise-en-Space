@@ -234,6 +234,17 @@ the finished scene in one command (Stage 1's Colab solves are reused when the wo
 them). `mise scene-splat S [--variant V] [--no-fixtures]` writes one splat of a layout (shell +
 objects at their poses, `objects.compose`) for renders outside the editor.
 
+**End to end (2026-11-27):** `learned-scan Room_Tour.mp4 --box ... --splat` into a fresh scene
+(Stage 1's Colab solves reused from the work folder; everything after them redone) ran without a
+hand step: 5 rooms, 4 doorways, scale x1.034; room splats 26.7 / 27.9 / 25.4 / 27.9 dB held out;
+the same floors, walls, ceilings, block walls, window, three closed doors as the hand-assembled
+scene; 31 objects (11 fixtures) settled to 2 small overlaps. About 2.5 h, most of it waiting for
+Colab GPUs (the main room's splat waited an hour for one). Checked in the editor (built with
+`npm ci && npx vite build` in `editor/`; served by `mise serve`; headless Chrome with
+SwiftShader for screenshots, no local GPU) and in GPU renders beside the photos: the empty home
+is clean; objects are recognizable but smeared where they were filmed from a few angles or very
+close (the bathroom light).
+
 What it took to get sharp splats (held-out PSNR; renders saved beside the photos):
 
 | | whole tour | room windows |
