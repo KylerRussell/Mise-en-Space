@@ -274,7 +274,7 @@ def to_splat(surfaces: list[dict], cell: float) -> ply.Splat:
         if np.linalg.det(R) < 0:
             R[:, 1] *= -1
         rot.append(np.tile(ply.rotmat_to_quat(R), (n, 1)))
-        scl.append(np.tile(np.log([0.6 * cell, 0.6 * cell, 0.002]), (n, 1)))
+        scl.append(np.tile(np.log([0.85 * cell, 0.85 * cell, 0.002]), (n, 1)))  # discs that overlap: no dot grid up close
     out = ply.Splat(xyz=np.concatenate(xyz).astype(np.float32))
     out.f_dc = ((np.concatenate(rgb) - 0.5) / ply.SH_C0).astype(np.float32)
     out.opacity = np.full(len(out), 5.0, np.float32)
