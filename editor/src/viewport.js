@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf } from "@sparkjsdev/spark";
 import { extentOf, footprint, inAny, liveConflicts } from "./geometry.js";
 import { EXTERIOR, doorLeaves, entryDoor, wallPieces } from "./walls3d.js";
 
@@ -235,9 +235,33 @@ export class Viewport {
         this.roomGroup.add(sill);
       }
     }
+    this.wallCuts = [];
     if (room.splat) {
       const splat = new SplatMesh({ url: this.fileUrl(sceneId, room.splat) });
+      // dollhouse for the splat: from outside, a wall between you and its room is cut away (a box per
+      // wall that sets its Gaussians' opacity to 0; Gaussians show from both sides, so fading won't do)
+      const edit = new SplatEdit({ rgbaBlendMode: "multiply" });
+      for (const w of room.walls || []) {
+        const [ax, ay] = w.a, [bx, by] = w.b;
+        const len = Math.hypot(bx - ax, by - ay);
+        if (len < 0.05) continue;
+        const h = w.height || room.ceiling_height;
+        const box = new SplatEditSdf({ type: "box", opacity: 0 });
+        box.position.set((ax + bx) / 2, (ay + by) / 2, h / 2);
+        box.rotation.z = Math.atan2(by - ay, bx - ax);
+        box.scale.set(len / 2 - 0.01, 0.07, h / 2 + 0.1); // half sizes
+        box.visible = false;
+        edit.add(box);
+        const n = w.inward_normal || [0, 0];
+        this.wallCuts.push({ box, out: [-n[0], -n[1]], c: [(ax + bx) / 2, (ay + by) / 2] });
+      }
+      splat.add(edit);
       this.roomGroup.add(splat);
+    }
+    if (room.ceiling_splat) {  // ceilings only when walking through: from above they'd hide the rooms
+      const ceil = new SplatMesh({ url: this.fileUrl(sceneId, room.ceiling_splat) });
+      ceil.userData.walkOnly = true;
+      this.roomGroup.add(ceil);
     }
     const [[minX, minY], [maxX, maxY]] = [room.bounds.min, room.bounds.max];
     this.bounds = { minX, maxX, minY, maxY };
@@ -549,6 +573,9 @@ export class Viewport {
     });
     // dollhouse: from outside, walls between you and the rooms fade so you can see in
     const cam = this.camera.position;
+    for (const { box, out, c } of this.wallCuts || []) {
+      box.visible = this.mode === "orbit" && out[0] * (cam.x - c[0]) + out[1] * (cam.y - c[1]) > 0;
+    }
     for (const m of this.wallMeshes || []) {
       const { out, c, mats } = m.userData.wall;
       const near = this.mode === "orbit" && out[0] * (cam.x - c[0]) + out[1] * (cam.y - c[1]) > 0;

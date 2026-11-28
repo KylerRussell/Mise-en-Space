@@ -74,6 +74,7 @@ async function refresh({ room = false } = {}) {
   if (room || !state.room) {
     state.room = await api.room(s, v);
     vp.setRoom(s, state.room);
+    await renderFinishes();
   }
   state.objects = objects;
   vp.setObjects(visible());
@@ -91,13 +92,45 @@ async function refresh({ room = false } = {}) {
 let pending = null;
 function onEvent(evt) {
   if (evt.type === "op" && evt.op?.kind === "create_variant") loadVariants();
-  const roomChanged = evt.op?.kind === "room";
+  const roomChanged = ["room", "finish", "promote"].includes(evt.op?.kind);
   // Coalesce bursts (the AI can make many edits quickly).
   clearTimeout(pending);
   pending = setTimeout(() => {
     if (!vp.drag) refresh({ room: roomChanged });
     if (evt.op && evt.op.actor === "agent" && evt.op.variant === state.variant) toast(`AI: ${evt.op.kind} ${evt.op.object_id ?? ""}`);
   }, 120);
+}
+
+// ---- finishes: paint, floors, ceilings, trim (per layout) ----------------------
+const FINISH_PARTS = [["floor", "Floor"], ["walls", "Walls"], ["ceiling", "Ceiling"], ["trim", "Trim"]];
+async function renderFinishes() {
+  const box = $("#finish-list");
+  if (!box) return;
+  let f;
+  try { f = await api.finishes(state.scene, state.variant); } catch { box.innerHTML = ""; return; }
+  const spaces = f.spaces.filter((sp) => !state.space || sp.space === state.space);
+  box.innerHTML = spaces.map((sp) => `
+    <div class="finish-space"><div class="dim">${esc(sp.name)}</div>
+    ${FINISH_PARTS.map(([part, label]) => {
+      const sf = sp[part] || {};
+      const changed = sp.changed.includes(part) ? `<span class="pill" title="changed in this layout">new</span>` : "";
+      const kinds = f.kinds.map((k) => `<option ${k === (sf.kind || "") ? "selected" : ""}>${k}</option>`).join("");
+      return `<div class="row finish-row" data-space="${esc(sp.space)}" data-part="${part}">
+        <span class="grow">${label} ${changed}</span>
+        <select class="finish-kind" title="material"><option value="">—</option>${kinds}</select>
+        <input class="finish-color" type="color" value="${esc(sf.color || "#cccccc")}" title="color" /></div>`;
+    }).join("")}
+    ${Object.keys(sp.wall_overrides).length ? `<div class="muted">${Object.entries(sp.wall_overrides).map(([w, s]) => `wall ${esc(w)}: ${esc(s.kind || "")}`).join(" · ")}</div>` : ""}
+    </div>`).join("");
+  for (const row of box.querySelectorAll(".finish-row")) {
+    const send = (body) => guarded(async () => {
+      await api.setFinish(state.scene, state.variant, { space: row.dataset.space, part: row.dataset.part, ...body });
+      toast(`${row.dataset.part} updated`);
+      await refresh({ room: true });
+    });
+    row.querySelector(".finish-color").onchange = (e) => send({ color: e.target.value });
+    row.querySelector(".finish-kind").onchange = (e) => e.target.value && send({ kind: e.target.value });
+  }
 }
 
 // ---- panels ------------------------------------------------------------------
@@ -142,6 +175,7 @@ function selectSpace(id) {
   vp.focusSpace(state.room.spaces.find((s) => s.id === id) || null);
   renderSpaces();
   renderObjectList();
+  renderFinishes();
 }
 
 async function roomEdit(fn, msg) {

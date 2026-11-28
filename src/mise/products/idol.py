@@ -127,3 +127,61 @@ class IdolClient:
                     f.write(chunk)
         return IdolResult(kind="mesh" if mesh else "splat", path=path,
                           up_axis=(0.0, 1.0, 0.0) if mesh else None, raw=raw, cost_usd=0.20 if mesh else None)
+
+
+class IdolColab:
+    """Idol (speridlabs/idol, open weights) run on the owner's Colab GPU instead of a hosted API.
+
+    Each call packs the product image, runs scripts/colab/idol_run.py on a fresh `mise-idol-*`
+    session through run_learned_recon.py --idol, and fetches the splat. A few minutes per call,
+    most of it starting the VM and installing Idol. Needs a Hugging Face login on this machine
+    whose account has accepted the terms of Idol's gated encoders (DINOv3, FLUX.2-dev).
+    """
+
+    def __init__(self, repo: Path | None = None, gpu: str = "L4,G4,A100,H100", num_gaussians: int = 262144,
+                 runner=None, http: httpx.Client | None = None):
+        self.repo = Path(repo) if repo else Path(__file__).resolve().parents[3]
+        self.gpu, self.num_gaussians = gpu, num_gaussians
+        self.http = http or httpx.Client(timeout=60, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+        self.run = runner or self._run
+
+    def _run(self, cmd: list[str], log: Path) -> int:
+        import subprocess
+
+        with open(log, "w") as fh:
+            return subprocess.run(cmd, cwd=self.repo, stdout=fh, stderr=subprocess.STDOUT).returncode
+
+    def generate(self, image_url: str, out_dir: Path, image_type: Literal["real", "synthetic"] = "real",
+                 mesh: bool = False) -> IdolResult:
+        import json
+        import sys
+        import uuid
+
+        if mesh:
+            raise IdolError("Idol on Colab makes splats only (Idol Max meshes are the hosted API)")
+        out_dir = Path(out_dir)
+        inp = out_dir / "idol-in"
+        inp.mkdir(parents=True, exist_ok=True)
+        ext = Path(image_url.split("?")[0]).suffix.lower() if Path(image_url.split("?")[0]).suffix.lower() in (
+            ".jpg", ".jpeg", ".png", ".webp") else ".jpg"
+        name = f"product{ext}"
+        if image_url.startswith(("http://", "https://")):
+            r = self.http.get(image_url)
+            r.raise_for_status()
+            (inp / name).write_bytes(r.content)
+        else:
+            (inp / name).write_bytes(Path(image_url).read_bytes())
+        (inp / "images.json").write_text(json.dumps([{"name": name, "mode": image_type}]))
+        run_out = out_dir / "idol-out"
+        cmd = [sys.executable, str(self.repo / "scripts" / "colab" / "run_learned_recon.py"),
+               f"idol-{uuid.uuid4().hex[:6]}", "--idol", str(inp), "--gpu", self.gpu, "--out", str(run_out),
+               "--num-gaussians", str(self.num_gaussians)]
+        code = self.run(cmd, out_dir / "idol.log")
+        ply_path = run_out / "product.ply"
+        if code != 0 or not ply_path.exists():
+            tail = (out_dir / "idol.log").read_text()[-600:] if (out_dir / "idol.log").exists() else ""
+            raise IdolError(f"Idol on Colab failed (exit {code}): {tail}")
+        dest = out_dir / "model.ply"
+        dest.write_bytes(ply_path.read_bytes())
+        meta = json.loads((run_out / "meta.json").read_text()) if (run_out / "meta.json").exists() else {}
+        return IdolResult(kind="splat", path=dest, up_axis=None, raw=meta)

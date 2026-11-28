@@ -17,14 +17,14 @@ import numpy as np
 
 
 def probe(video: Path) -> dict:
+    # full stream/format sections: `-show_entries stream_side_data=...` only exists in newer ffprobe
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-         "stream=width,height,r_frame_rate,nb_frames:stream_side_data=rotation:format=duration", "-of", "json", str(video)],
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams", "-show_format", "-of", "json", str(video)],
         capture_output=True, text=True, check=True)
     d = json.loads(out.stdout)
     s = d["streams"][0]
     num, den = map(int, s["r_frame_rate"].split("/"))
-    rot = 0
+    rot = int(float((s.get("tags") or {}).get("rotate", 0)))  # older muxers / ffprobe
     for sd in s.get("side_data_list", []) or []:
         if "rotation" in sd:
             rot = int(sd["rotation"])

@@ -87,3 +87,153 @@ def test_home_scene_from_outline():
     assert {o.wall.split(".")[0] for o in sc.room.openings} == {"room_1", "room_2"}
     assert all(abs(o.width - 0.8) < 1e-9 for o in sc.room.openings)
     assert check_layout(sc) == []  # the two rooms are joined through the doorway
+
+
+def test_fuzzy_walls_furniture_and_a_closet():
+    """Dense, noisy learned depth: walls are a fuzzy layer, a sideboard stands against one wall, and
+    a reach-in closet opens off the room. The room keeps its true walls; the closet is its own space."""
+    rng = np.random.default_rng(3)
+    # room 0..4 x 0..3.6; closet 4.12..4.72 x 1.0..2.4, opening 1.2..2.2 in the wall x = 4..4.12
+    walls = [((0, 0), (4, 0)), ((4, 0), (4, 1.2)), ((4, 2.2), (4, 3.6)), ((4, 3.6), (0, 3.6)), ((0, 3.6), (0, 0)),
+             ((4, 1.2), (4.12, 1.2)), ((4, 2.2), (4.12, 2.2)), ((4.12, 1.2), (4.12, 1.0)), ((4.12, 1.0), (4.72, 1.0)),
+             ((4.72, 1.0), (4.72, 2.4)), ((4.72, 2.4), (4.12, 2.4)), ((4.12, 2.4), (4.12, 2.2))]
+    segs = [(np.array(a, float), np.array(b, float)) for a, b in walls]
+    pts = []
+    for a, b in segs:
+        t = rng.uniform(0, 1, max(4, int(300 * np.linalg.norm(b - a))))
+        e = (b - a) / np.linalg.norm(b - a)
+        xy = a + (b - a) * t[:, None] + np.array([e[1], -e[0]]) * rng.normal(0, 0.08, len(t))[:, None]
+        pts.append(np.c_[xy, rng.uniform(0.1, 2.4, len(t))])
+    # a 0.45 m deep sideboard along the south wall, 0.9 m tall: its front and top are points too
+    side = np.c_[rng.uniform(0.5, 3.0, 1500), rng.uniform(0.0, 0.45, 1500), rng.uniform(0.1, 0.9, 1500)]
+    pts = np.vstack(pts + [side])
+    cams = np.array([(x, y, 1.45) for x in (0.8, 1.6, 2.4, 3.2) for y in (0.9, 1.8, 2.7)] + [(3.6, 1.7, 1.45), (3.8, 1.5, 1.4)])
+
+    def visible(c, p):
+        q = p[:2] + (c[:2] - p[:2]) * 0.12 / max(np.linalg.norm(c[:2] - p[:2]), 1e-9)
+        if 0.5 < p[0] < 3.0 and p[1] < 0.45 and p[2] > 0.9 and c[1] > 0.45:
+            return True  # sideboard top and front
+        blocked = any(_cross(c[:2], q, a, b) for a, b in segs)
+        behind_side = c[2] > 0 and p[2] < 0.9 and p[1] < 0.45 and 0.5 < p[0] < 3.0 and not (0.40 < p[1] < 0.45)
+        return not blocked and not behind_side
+
+    sights = [np.array([p for p in pts if visible(c, p)]) for c in cams]
+    home = room_outline.segment_home(cams, sights, pts)
+    _, placed = room_outline.snap_edges_to_walls(home.rooms, cams, sights)
+    room_outline.push_furniture_edges(home.rooms, pts, skip=placed)
+    room_outline.settle_closets(home.rooms)
+    areas = sorted(r.area_m2 for r in home.rooms)
+    assert len(home.rooms) == 2, areas
+    assert abs(areas[1] - 14.4) / 14.4 < 0.06  # the room, walls on the wall layer, not at the sideboard
+    assert 0.6 < areas[0] < 1.05  # the closet: 0.84 m2, plus the doorway's depth through the wall
+    closet = min(home.rooms, key=lambda r: r.area_m2)
+    assert closet.kind == "closet"
+    room_poly, closet_poly = np.array(max(home.rooms, key=lambda r: r.area_m2).polygon), np.array(closet.polygon)
+    assert closet_poly[:, 0].min() >= room_poly[:, 0].max() - 0.01  # no overlap: the mouth is on the room's wall
+    room = max(home.rooms, key=lambda r: r.area_m2)
+    ys = [y for _, y in room.polygon]
+    assert min(ys) < 0.08  # south wall at the wall, behind the sideboard
+    assert any(set(d.rooms) == {0, 1} for d in home.doorways)
+
+
+def test_rooms_stay_apart_when_two_passes_disagree_about_their_wall():
+    """Two rooms solved in separate passes, joined a little off: each room's copy of the wall between
+    them sits 0.2 m inside the other room, so each room's sight lines run past the other's copy and
+    free space alone crosses the wall. The points on the wall keep the rooms apart."""
+    rng = np.random.default_rng(1)
+
+    def wall_pts(a, b, per_m):
+        a, b = np.array(a, float), np.array(b, float)
+        t = rng.uniform(0, 1, max(4, int(per_m * np.linalg.norm(b - a))))
+        return np.c_[a + (b - a) * t[:, None], rng.uniform(0.1, 2.4, len(t))]
+
+    # left room 0..3 (thinks its east wall is at 3.2), right room 3.12..6 (thinks its west wall is at 2.9),
+    # both with the doorway at y 1.0..1.8
+    left_walls = [((0, 0), (3.2, 0)), ((0, 3), (3.2, 3)), ((0, 0), (0, 3)), ((3.2, 0), (3.2, 1.0)), ((3.2, 1.8), (3.2, 3))]
+    right_walls = [((2.9, 0), (6, 0)), ((2.9, 3), (6, 3)), ((6, 0), (6, 3)), ((2.9, 0), (2.9, 1.0)), ((2.9, 1.8), (2.9, 3))]
+    left = np.vstack([wall_pts(a, b, 150) for a, b in left_walls])
+    right = np.vstack([wall_pts(a, b, 150) for a, b in right_walls])
+    cams_l = [(x, y, 1.5) for x in (0.8, 1.6, 2.4) for y in (0.8, 1.5, 2.2)]
+    cams_r = [(x, y, 1.5) for x in (3.8, 4.6, 5.4) for y in (0.8, 1.5, 2.2)]
+
+    def seen(c, pts, walls):
+        segs = [(np.array(a, float), np.array(b, float)) for a, b in walls]
+        out = []
+        for p in pts:
+            q = p[:2] + (np.array(c[:2]) - p[:2]) * 0.02 / max(np.linalg.norm(np.array(c[:2]) - p[:2]), 1e-9)
+            if not any(_cross(np.array(c[:2]), q, a, b) for a, b in segs):
+                out.append(p)
+        return np.array(out)
+
+    cams = np.array(cams_l + cams_r)
+    sights = [seen(c, left, left_walls) for c in cams_l] + [seen(c, right, right_walls) for c in cams_r]
+    pts = np.vstack([left, right])
+    merged = room_outline.segment_home(cams, sights, pts, wall_pts=None)
+    assert len(merged.rooms) == 1  # what happened before: one room across both
+    home = room_outline.segment_home(cams, sights, pts)
+    assert len(home.rooms) == 2, sorted(r.area_m2 for r in home.rooms)
+    assert len(home.doorways) >= 1
+
+
+def test_a_doorway_walked_through_but_hardly_seen():
+    """Two rooms whose cameras only looked at their own room's walls: the sight lines never cross
+    the doorway, so free space alone has no doorway. The walk through it does."""
+    rng = np.random.default_rng(2)
+    walls = [((0, 0), (3, 0)), ((3, 0), (3, 1.0)), ((3, 1.8), (3, 3)), ((3, 3), (0, 3)), ((0, 3), (0, 0)),
+             ((3.12, 0), (6, 0)), ((6, 0), (6, 3)), ((6, 3), (3.12, 3)), ((3.12, 3), (3.12, 1.8)), ((3.12, 1.0), (3.12, 0)),
+             ((3, 1.0), (3.12, 1.0)), ((3, 1.8), (3.12, 1.8))]
+    pts = []
+    for a, b in walls:
+        a, b = np.array(a, float), np.array(b, float)
+        t = rng.uniform(0, 1, max(4, int(80 * np.linalg.norm(b - a))))
+        pts.append(np.c_[a + (b - a) * t[:, None], rng.uniform(0.1, 2.4, len(t))])
+    pts = np.vstack(pts)
+    left = [(1, 1, 1.5), (2, 2, 1.5), (1.5, 1.4, 1.5), (2.4, 1.0, 1.5)]
+    right = [(4.5, 1, 1.5), (5, 2.2, 1.5), (4, 2.4, 1.5), (3.8, 1.6, 1.5)]
+    sights = [pts[pts[:, 0] < 2.95] for _ in left] + [pts[pts[:, 0] > 3.17] for _ in right]
+    cams = np.array(left + right)
+    def in_wall(home):  # doorways in the wall between the two rooms
+        return [d for d in home.doorways if 2.85 < d.center[0] < 3.3]
+
+    assert not in_wall(room_outline.segment_home(cams, sights))
+    # the walk: around the left room, through the doorway (y 1.4), around the right room
+    knots = np.array([(1, 1, 1.5), (2, 1.4, 1.5), (2.7, 1.4, 1.5), (3.06, 1.4, 1.5), (3.5, 1.4, 1.5), (4.5, 1, 1.5)])
+    walk = np.vstack([a + (b - a) * f for a, b in zip(knots[:-1], knots[1:]) for f in np.linspace(0, 1, 6)[:-1]])
+    found = in_wall(room_outline.segment_home(cams, sights, walk=walk))
+    assert len(found) == 1 and abs(found[0].center[1] - 1.4) < 0.3
+
+
+def test_rooms_settle_into_one_plan():
+    """Two rooms solved apart: their shared wall's faces overlap by 6 cm in one place; their
+    north walls are 7 cm apart. One wall, 12 cm thick; one north line."""
+    from mise.pipeline.room_outline import Outline, regularize_walls
+
+    def box(x0, y0, x1, y1):
+        return Outline(polygon=[(x0, y0), (x1, y0), (x1, y1), (x0, y1)], area_m2=(x1 - x0) * (y1 - y0), ceiling_m=None,
+                       free=np.zeros((1, 1)), origin=(0, 0), cell=0.05)
+
+    left, right = box(0, 0, 3.03, 3.0), box(2.97, 0.02, 6, 3.07)
+    rep = regularize_walls([left, right], thickness=0.12)
+    assert rep["shared_walls"] == 1 and rep["wall_lines"] >= 1
+    lx = max(x for x, _ in left.polygon)
+    rx = min(x for x, _ in right.polygon)
+    assert abs((rx - lx) - 0.12) < 1e-6 and abs((rx + lx) / 2 - 3.0) < 1e-6
+    assert abs(max(y for _, y in left.polygon) - max(y for _, y in right.polygon)) < 1e-6
+
+
+def test_a_closet_wall_is_behind_the_clothes():
+    """Hanging clothes 0.45 m in front of a closet's back wall make the denser layer; the wall
+    is the outermost solid one."""
+    from mise.pipeline.room_outline import Outline, snap_edges_to_walls
+
+    rng = np.random.default_rng(3)
+    room = Outline(polygon=[(0, 0), (2, 0), (2, 1.5), (0, 1.5)], area_m2=3.0, ceiling_m=None,
+                   free=np.zeros((1, 1)), origin=(0, 0), cell=0.05)
+
+    def layer(y, n):  # points across the room's width at y, 1.35-2.25 m up
+        return np.c_[rng.uniform(0.2, 1.8, n), rng.normal(y, 0.01, n), rng.uniform(1.35, 2.25, n)]
+    pts = np.vstack([layer(1.95, 400), layer(1.5, 900), layer(-0.02, 600)])  # wall behind, clothes, south wall
+    cams = np.array([(0.6, 0.7, 1.5), (1.0, 0.8, 1.5), (1.4, 0.6, 1.5)])
+    snap_edges_to_walls([room], cams, [pts] * 3)
+    assert abs(max(y for _, y in room.polygon) - 1.95) < 0.03
+

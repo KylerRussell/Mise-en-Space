@@ -119,6 +119,8 @@ class Opening(BaseModel):
     top: float = 2.0
     swing: Literal["in", "out", "none", "sliding"] = "in"
     hinge: Literal["left", "right"] = "left"
+    leaf: bool = Field(False, description="a closed door stands in it (an entry or closet door), not an open doorway")
+    color: str | None = Field(None, pattern=r"^#[0-9a-fA-F]{6}$", description="the door's or glass's look, #rrggbb")
 
 
 class Wall(BaseModel):
@@ -153,12 +155,21 @@ def polygon_area(pts) -> float:
 HEX_COLOR = r"^#[0-9a-fA-F]{6}$"
 
 
+MATERIALS = ("paint", "wood", "tile", "carpet", "block", "popcorn", "stone", "other")
+
+
 class Surface(BaseModel):
-    """How a floor, wall or ceiling looks: a color, optionally a repeating texture image."""
+    """How a floor, wall or ceiling looks: a color, optionally a repeating texture image, and what
+    it is made of (so it can be changed: repaint the walls, lay a different floor)."""
 
     color: str | None = Field(None, pattern=HEX_COLOR, description="average color, #rrggbb")
     texture: str | None = Field(None, description="image under the scene's folder, e.g. finishes/floor.jpg")
     size_m: float = Field(1.0, gt=0, description="the texture image covers size_m x size_m of surface")
+    kind: Literal["paint", "wood", "tile", "carpet", "block", "popcorn", "stone", "other"] | None = Field(
+        None, description="material: paint (flat color), wood (planks), tile, carpet, block (painted masonry), ...")
+    direction_deg: float | None = Field(
+        None, description="planks/rows run this way: degrees CCW from +x on floors, from horizontal on walls")
+    module_m: float | None = Field(None, gt=0, description="plank width, tile size or block course height")
 
     @field_validator("texture")
     @classmethod
@@ -172,6 +183,45 @@ class Finish(BaseModel):
     floor: Surface | None = None
     walls: Surface | None = None
     ceiling: Surface | None = None
+    wall_overrides: dict[str, Surface] = Field(
+        default_factory=dict, description="walls (by wall id) that differ from `walls`: an accent wall, block")
+    trim: Surface | None = Field(None, description="baseboards and door and window casings")
+    baseboard_m: float | None = Field(None, gt=0, description="baseboard height")
+
+
+FINISH_PARTS = ("floor", "walls", "ceiling", "trim")
+
+
+def finish_of(sp: "Space", part: str) -> Surface | None:
+    """The surface a space has for a part: floor, walls, ceiling, trim, or wall:<id> (one wall)."""
+    f = sp.finish
+    if f is None:
+        return None
+    if part.startswith("wall:"):
+        return f.wall_overrides.get(part[5:]) or f.walls
+    if part not in FINISH_PARTS:
+        raise ValueError(f"part is one of {', '.join(FINISH_PARTS)} or wall:<wall id>, not {part!r}")
+    return getattr(f, part)
+
+
+def apply_finish(sp: "Space", part: str, surface: Surface | None) -> None:
+    """Set a part's surface. Repainting `walls` repaints every wall of the space, painted block
+    and accent walls included (each keeps its own material and pattern); `wall:<id>` sets one."""
+    if sp.finish is None:
+        sp.finish = Finish()
+    f = sp.finish
+    if part.startswith("wall:"):
+        if surface is None:
+            f.wall_overrides.pop(part[5:], None)
+        else:
+            f.wall_overrides[part[5:]] = surface
+        return
+    if part not in FINISH_PARTS:
+        raise ValueError(f"part is one of {', '.join(FINISH_PARTS)} or wall:<wall id>, not {part!r}")
+    if part == "walls" and surface is not None and surface.color:
+        for wid, w in list(f.wall_overrides.items()):  # painted block, an accent wall: the new paint too
+            f.wall_overrides[wid] = w.model_copy(update={"color": surface.color})
+    setattr(f, part, surface)
 
 
 class Space(BaseModel):
@@ -272,6 +322,13 @@ class Room(BaseModel):
         if self.spaces:
             return self.spaces
         return [Space(id="room", name="Room", polygon=self.floor_polygon)]
+
+    def own_spaces(self) -> list[Space]:
+        """The spaces, made explicit (a single-room floor's implicit space becomes a real one), so a
+        change to one (its finish) is kept."""
+        if not self.spaces:
+            self.spaces = self.space_list()
+        return self.spaces
 
     def polygons(self) -> list[list[tuple[float, float]]]:
         return [s.polygon for s in self.space_list()]
@@ -418,6 +475,10 @@ class Variant(BaseModel):
     supports: dict[str, str] = Field(default_factory=dict)
     added: list[SceneObject] = Field(default_factory=list)
     hidden: list[str] = Field(default_factory=list)
+    finishes: dict[str, dict[str, Surface]] = Field(
+        default_factory=dict, description="finish changes: space id -> part (floor, walls, ceiling, trim, "
+        "wall:<wall id>) -> the surface it has in this layout")
+    room_splat: str | None = Field(None, description="this layout's empty-home splat (its finishes), if rebuilt")
 
 
 class LayoutRules(BaseModel):
@@ -456,6 +517,22 @@ class Scene(BaseModel):
             if a.id == asset_id:
                 return a
         raise KeyError(f"no library asset {asset_id!r}")
+
+    def resolve_room(self, variant_id: str = MAIN) -> Room:
+        """The room as a layout has it: the main room with the variant's finish changes."""
+        if variant_id == MAIN:
+            return self.room
+        v = self.variant(variant_id)
+        if not v.finishes:
+            return self.room
+        room = self.room.model_copy(deep=True)
+        for sp_id, parts in v.finishes.items():
+            sp = next((x for x in room.own_spaces() if x.id == sp_id), None)
+            if sp is None:
+                continue
+            for part in sorted(parts, key=lambda k: k.startswith("wall:")):  # whole walls first, then single walls
+                apply_finish(sp, part, parts[part])
+        return room
 
     def resolve(self, variant_id: str = MAIN, include_hidden: bool = False) -> list[SceneObject]:
         """Effective object list for a variant (main = the base objects)."""

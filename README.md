@@ -48,12 +48,12 @@ For editor development with hot reload, run `npm run dev` in `editor/` (it proxi
 
 | Stage | Code | Status |
 | --- | --- | --- |
-| 1 Capture and metric scale | `pipeline/scale.py` (triangulate markers, per-marker scale, held-out report), `pipeline/markers.py` (ArUco detection, printable sheets), `pipeline/normalize.py` (RANSAC floor, z up, Manhattan wall alignment) | Implemented and tested on synthetic data; needs a real capture |
-| 2 Reconstruction and decomposition | `pipeline/external.py` (Nerfstudio commands), `pipeline/decompose.py` (split labeled splat, OBBs, canonical frames, shadow-dilated removal, plane + texture-copy floor fill, `scene.json` packaging) | Packaging and the H2 baseline arm are implemented. Gaussian Grouping, SAM 3D and Inpaint360GS run as external tools |
-| 3 Scene model and editor | `scene/` (models, geometry, checks, snapping, op log with undo/redo, variants, diff/promote), `backend/app.py` (FastAPI + WebSocket), `editor/` (three.js + Spark) | Working: orbit / walk / plan, drag, rotate, snap, live warnings, add, delete, history, per-change accept |
-| 4 Adding objects at true scale | `products/` (listing extraction, dimension parser, Idol client, orientation, uniform scale fit + anisotropy gate, box fallback, color match) | Working end to end with a stand-in generator; the Idol endpoint details still need checking (see below) |
-| 5 MCP server | `mcp_server/server.py`: every tool in the plan's table, plus `solve_layout`, `shopping_list`, `list_variants`, `get_job`, `undo` | Working over stdio and in-process |
-| 6 AI design agent | `.claude/skills/redesign-room/SKILL.md`, `agent/solver.py` (relations + physics, simulated annealing + walkway repair), `agent/shopping.py` | Working; layout quality is what H5 will measure |
+| 1 Video to measured layout | `pipeline/learned_flow.py` (learned camera solves on Colab, room by room), `pipeline/scan.py`, `pipeline/room_outline.py`, `eval/floorplan.py` | Working on a real walkthrough: scale from a known object (no markers), rooms, doorways, walls |
+| 2 Splats, empty home, objects | `pipeline/splat_flow.py` (room splats on Colab), `pipeline/shell.py` + `materials.py` + `trim.py` (empty home from the photos: materials, block, trim, windows, doors), `pipeline/objects.py` | Working on a real walkthrough; `mise learned-scan ... --splat` does Stages 1 and 2 in one command |
+| 3 Scene model and editor | `scene/` (models, geometry, checks, snapping, op log with undo/redo, variants, diff/promote, finishes per layout), `backend/app.py` (FastAPI + WebSocket), `editor/` (three.js + Spark) | Working: orbit / walk / plan over the empty-home splat, drag, rotate, snap, live warnings, add, delete, history, per-change accept, a Finishes panel (paint, floors) |
+| 4 Adding objects at true scale | `products/` (listing extraction, dimension parser, Idol on Colab or hosted, orientation, uniform scale fit + anisotropy gate, box fallback, color match) | Listings parse on real retailer pages; 3D generation needs Idol's gated encoders on your Hugging Face account (see below), else products are labeled boxes at their listed size |
+| 5 MCP server | `mcp_server/server.py`: every tool in the plan's table, plus `solve_layout`, `shopping_list`, `get_finishes`, `set_finish`, `list_variants`, `get_job`, `undo` | Working over stdio and in-process |
+| 6 AI design agent | `.claude/skills/redesign-room/SKILL.md`, `agent/solver.py` (relations + physics, simulated annealing + walkway repair), `agent/shopping.py` | Run once on a scanned home (a stand-in brief); layout quality is what H5 will measure |
 | Evaluation | `eval/hypotheses.py`: H1 to H6 scoring, Chamfer, masked LPIPS, blind A/B study builder | Helpers ready; experiments not run |
 
 ## Scene conventions
@@ -123,6 +123,60 @@ up there too. The *Live coach* tab checks your phone camera's view while you fil
 at once when the footage won't map (the camera needs https on a phone). Scans stay on your
 computer, under `scans/` next to the scene store (`MISE_SCANS` to move it).
 
+**Camera solve from a learned model (Colab GPU).** Where COLMAP collapses (turning on the
+spot, plain walls), a feed-forward model can solve the cameras instead. One command does the
+whole home, room by room:
+
+```bash
+mise learned-scan walkthrough.mp4 --scene my-flat   # Depth Anything 3 on Colab, then the scan
+```
+
+It picks frames, takes one rough pass over the whole walk, solves each room window three times
+over slightly different stretches on concurrent Colab sessions (keeping the solve the other two
+agree with: now and then a run folds a room), chains the windows through the frames they share
+and builds the scene. The scale is the model's metres checked against every doorway (a standard
+door's opening is about 2.06 m tall) and, with `--box clicks.json`, an object of known size;
+the estimates and their error bars land in `learned-run/scale.json`. Steps already done in its
+work folder are reused. The parts, by hand:
+
+```bash
+python scripts/colab/run_learned_recon.py bedroom --t0 134 --t1 182 --model da3_nested   # one stretch
+mise join-poses data/scans/learned/home data/scans/learned/main data/scans/learned/bedroom
+mise scan walkthrough.mp4 --scene my-flat --poses data/scans/learned/home --frames data/scans/tour-frames
+```
+
+The first command uploads the stretch's frames (already picked by mise into `--frames`) to a
+Colab VM through the `colab` CLI, runs `scripts/colab/learned_recon.py` there, downloads a
+COLMAP model with points from each frame's depth, and stops the VM. `--poses` imports it and
+carries on as `--resume`, with `--scale 1.0` when the model's scale is metric (Depth Anything 3,
+MapAnything). `--model` takes `mapanything`, `vggt`, `pi3`, `pi3x`, `da3`, `da3_nested`, `must3r`
+(MapAnything's wrappers); `--gpu H100` chooses the GPU; runs with different names can go at once.
+`python -m mise.eval.floorplan PLAN --room R LABEL=SOLVE [--box CLICKS]` scores a solve against a
+floor plan (and a reference object of known size).
+
+**Splat and empty home (Colab GPU).** After a learned scan:
+
+```bash
+mise learned-scan tour.mp4 --scene my-flat --box box.json --splat   # video to everything, one command
+mise splat-home my-flat        # or Stage 2 alone, after a learned scan
+mise scene-splat my-flat       # one splat of a layout: the empty home with its objects placed
+```
+
+The scene's room splat is the empty home (`splats/empty.ply`); what stood in it comes back as
+objects, nudged apart where their rough boxes overlap (built-ins stay where they were filmed).
+`splats/home.ply`, the home as filmed, stays beside it.
+
+It bundle-adjusts the cameras, trains one Gaussian splat per room visit on concurrent Colab
+sessions (depth from the model as a guide, each camera learning a small correction), and joins
+them room by room. The empty home is the traced layout's walls, floors and ceilings painted from
+the photos where nothing stood in front of them, and filled from around where something did.
+Each room's floor, walls and ceiling are also recorded as materials in the scene (paint and its
+color, wood planks and which way they run, tile, carpet...), with the room's light kept apart, so
+after changing one (`space.finish`, e.g. a new wall color) `mise shell-render my-flat` rebuilds
+the empty home in a second. The things come back as movable objects (`mise scan-objects`).
+The parts: `mise refine-poses`, `run_learned_recon.py NAME --splat SOLVE`, `mise splat-merge`,
+`mise empty-room`.
+
 ## Scan to scene with splats (once you have a capture)
 
 ```bash
@@ -168,7 +222,15 @@ the generator's axes and tries every 90° arrangement against the listing instea
 listed lying down but generated standing up is matched by tipping it, not rejected.
 Pass `upright_only` to `import_product` to override the category default.
 
-**Idol API details are not verified.** The docs hosts were unreachable from the build
+**Idol on your own Colab (open weights).** `MISE_IDOL=colab mise serve` makes product imports
+run [Idol](https://huggingface.co/speridlabs/idol) on a Colab GPU (`products/idol.py` `IdolColab`,
+`scripts/colab/idol_run.py`; a few minutes per product, most of it starting the VM). Idol downloads
+two gated encoders, so the Hugging Face account logged in on this machine must have accepted the
+terms of [DINOv3](https://huggingface.co/facebook/dinov3-vith16plus-pretrain-lvd1689m) (approved
+by hand) and [FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev). The token goes to
+the run's own VM inside its input bundle. Check Idol's output axes on the first real run.
+
+**Hosted Idol (fal) API details are not verified.** The docs hosts were unreachable from the build
 environment, so `products/idol.py` uses fal's generic queue API, and the model ids and
 the image field name are settings (`IDOL_MODEL`, `IDOL_MAX_MODEL`, `IDOL_IMAGE_FIELD`).
 The response is searched for the first `.ply`/`.glb` URL. Check these against

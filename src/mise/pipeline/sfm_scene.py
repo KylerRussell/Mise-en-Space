@@ -161,8 +161,14 @@ def _door_on_wall(room: Room, space_id: str, center, width: float, door_id: str)
 def home_scene(home: room_outline.HomeOutline, scene_id: str, name: str, ceiling: float | None = None) -> Scene:
     """Spaces from the room outlines (named Room 1, Room 2...), doorways as doors on both sides."""
     ceil = ceiling or next((r.ceiling_m for r in home.rooms if r.ceiling_m), None) or 2.5
-    spaces = [Space(id=f"room_{i + 1}", name=f"Room {i + 1}", kind="other", polygon=r.polygon)
-              for i, r in enumerate(home.rooms)]
+    spaces, n_room, n_closet = [], 0, 0
+    for i, r in enumerate(home.rooms):
+        if getattr(r, "kind", "room") == "closet":
+            n_closet += 1
+            spaces.append(Space(id=f"room_{i + 1}", name=f"Closet {n_closet}", kind="closet", polygon=r.polygon))
+        else:
+            n_room += 1
+            spaces.append(Space(id=f"room_{i + 1}", name=f"Room {n_room}", kind="other", polygon=r.polygon))
     room = Room(spaces=spaces, ceiling_height=round(ceil, 2))
     openings = []
     for k, d in enumerate(home.doorways):

@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "mise": {
-      "command": "mise",
-      "args": ["mcp"],
+      "command": "sh",
+      "args": ["-c", "if [ -x .venv/bin/mise ]; then exec .venv/bin/mise mcp; else exec mise mcp; fi"],
       "env": { "MISE_BACKEND": "http://127.0.0.1:8765" }
     }
   }

@@ -53,6 +53,7 @@ class ScanOptions:
     t0: float | None = None  # only this stretch of the video (seconds)
     t1: float | None = None
     resume: bool = False  # reuse the frames and solve already in the work folder
+    semantic: Path | None = None  # per-frame class labels (segment_frames.py): walls from structure only
 
 
 class Cancelled(Exception):
@@ -120,23 +121,73 @@ class ScanResult:
 # ---- the stages ------------------------------------------------------------------------
 
 def _frames(video: Path, work: Path, opts: ScanOptions, ev: ScanEvents) -> list[dict]:
-    import cv2
-
     from .video import extract_sharp_frames, probe
 
     info = probe(video)
     ev.emit("video", duration_s=info["duration_s"], width=info["width"], height=info["height"])
     fdir = work / "frames"
     kept = extract_sharp_frames(video, fdir, target_fps=opts.fps, oversample=2, width=opts.width, t0=opts.t0, t1=opts.t1)
-    thumbs = work / "thumbs"
-    thumbs.mkdir(exist_ok=True)
-    for k in kept:
-        img = cv2.imread(str(fdir / k["name"]))
-        cv2.imwrite(str(thumbs / k["name"]), cv2.resize(img, (240, round(240 * img.shape[0] / img.shape[1]))),
-                    [cv2.IMWRITE_JPEG_QUALITY, 70])
+    _thumbs(work, kept)
     (work / "frames.json").write_text(json.dumps(kept))
     ev.emit("frames", frames=[{"name": k["name"], "t": round(k["t"], 2)} for k in kept])
     return kept
+
+
+def _thumbs(work: Path, kept: list[dict]) -> None:
+    import cv2
+
+    thumbs = work / "thumbs"
+    thumbs.mkdir(exist_ok=True)
+    for k in kept:
+        img = cv2.imread(str(work / "frames" / k["name"]))
+        cv2.imwrite(str(thumbs / k["name"]), cv2.resize(img, (240, round(240 * img.shape[0] / img.shape[1]))),
+                    [cv2.IMWRITE_JPEG_QUALITY, 70])
+
+
+def import_poses(poses: Path, work: Path, frames_src: Path | None = None) -> dict:
+    """Put a camera solve made elsewhere into the work folder, so a `resume` run builds the home from it.
+
+    `poses` is what scripts/colab/learned_recon.py writes: frames.json ([{"name", "t"}]), a COLMAP
+    model in sparse/0 (text or binary) and meta.json (model, whether its scale is metric). The
+    frames it names are copied from `frames_src` (default: poses/frames). Earlier frames and
+    solves in the work folder are replaced. Returns meta.json (empty if there is none).
+    """
+    import shutil
+
+    import pycolmap
+
+    poses, work = Path(poses), Path(work)
+    meta = json.loads((poses / "meta.json").read_text()) if (poses / "meta.json").exists() else {}
+    kept = json.loads((poses / "frames.json").read_text())
+    src = Path(frames_src) if frames_src else poses / "frames"
+    if kept and not (src / kept[0]["name"]).exists() and (src / "frames").is_dir():
+        src = src / "frames"  # the pick folder (frames/ + frames.json), as run_learned_recon.py takes it
+    missing = [k["name"] for k in kept if not (src / k["name"]).exists()]
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} frames named in {poses / 'frames.json'} are not in {src} "
+                                f"(first: {missing[0]}); pass the folder they were picked into")
+    model = poses / "sparse" / "0"
+    if not model.exists():
+        raise FileNotFoundError(f"no COLMAP model at {model}")
+    rec = pycolmap.Reconstruction(str(model))
+    unknown = {im.name for im in rec.images.values()} - {k["name"] for k in kept}
+    if unknown:
+        raise ValueError(f"the model has {len(unknown)} images not in frames.json (first: {sorted(unknown)[0]})")
+    work.mkdir(parents=True, exist_ok=True)
+    for old in ("frames", "thumbs", "frames_eq", "sparse"):
+        if (work / old).exists():
+            shutil.rmtree(work / old)
+    (work / "database.db").unlink(missing_ok=True)
+    (work / "frames").mkdir()
+    for k in kept:
+        shutil.copy2(src / k["name"], work / "frames" / k["name"])
+    _thumbs(work, kept)
+    (work / "frames.json").write_text(json.dumps(kept))
+    out = work / "sparse" / "0"
+    out.mkdir(parents=True)
+    rec.write_binary(str(out))
+    (work / "poses_meta.json").write_text(json.dumps(meta, indent=1))
+    return meta
 
 
 def _check(work: Path, kept: list[dict], ev: ScanEvents) -> list:
@@ -287,6 +338,8 @@ def _place(recs: list, times: dict[str, float], opts: ScanOptions, ev: ScanEvent
             p["status"] = "reference"
             p["scale_from"] = how
             p["scale"] = round(Lp.scale, 5)
+            # scene = scale * R @ solve + t: what a splat trained on this solve's poses needs
+            p["scene_from_solve"] = {"scale": float(Lp.scale), "R": np.asarray(Lp.R).tolist(), "t": np.asarray(Lp.t).tolist()}
             continue
         try:
             Lp, rep = sfm_scene.align_by_time(recs[ref["id"]], L, times, recs[p["id"]], times)
@@ -488,9 +541,39 @@ def run_scan(video: Path, work: Path, opts: ScanOptions, store=None, ev: ScanEve
 
         current = "layout"
         ev.stage("layout", "running")
-        cams, sights, points, _names = _merge(L, pieces)
-        home = room_outline.segment_home(cams, sights, points)
-        fixes = room_outline.push_furniture_edges(home.rooms, points)
+        cams, sights, points, names = _merge(L, pieces)
+        wall_points, wall_cams, wall_sights = points, cams, sights
+        joined = [p for p in pieces if p.get("leveled") is not None]
+        if opts.semantic and not joined:
+            # what each point is (wall, bed, mirror...): free space is carved by every sight line but
+            # those through mirrors and windows, and walls are placed from the home's shell only
+            from . import sfm_scene, structure
+
+            labels, classes = structure.load_labels(Path(opts.semantic))
+            labels = structure.fill_see_through(labels, classes)
+            rr = recs[ref["id"]]
+            carve, rc = structure.structure_only(rr, labels, classes, keep=None, drop=structure.SEE_THROUGH)
+            shell, rs = structure.structure_only(rr, labels, classes)
+            Lc = sfm_scene._leveled(carve, L.R, L.t, L.scale, L.yaw_deg)
+            Ls = sfm_scene._leveled(shell, L.R, L.t, L.scale, L.yaw_deg)
+            cams, sights, names = Lc.cams, Lc.sights, Lc.image_names
+            wall_points, wall_cams, wall_sights = Ls.points, Ls.cams, Ls.sights
+            ev.emit("progress", stage="layout", message=f"{rc['dropped']} points seen through mirrors and windows set "
+                    f"aside; walls from {len(Ls.points)} of {rs['points']} points (wall, floor, ceiling, doors)")
+        elif opts.semantic:
+            ev.emit("progress", stage="layout", message="frame labels not used: the home is in several pieces")
+        home = room_outline.segment_home(cams, sights, wall_points, walk=cams[np.argsort(names)])  # names sort in time
+        # walls where the points above furniture height put them; the furniture test only where those are too few
+        snapped, placed = room_outline.snap_edges_to_walls(home.rooms, wall_cams, wall_sights)
+        if wall_sights is not sights:  # where the shell is hidden (a closet full of clothes): every point, outermost layer
+            more, placed2 = room_outline.snap_edges_to_walls(home.rooms, cams, sights, skip=placed)
+            snapped, placed = snapped + more, placed | placed2
+        ev.emit("progress", stage="layout", message=f"{len(placed)} walls found on their points, {len(snapped)} moved")
+        fixes = room_outline.push_furniture_edges(home.rooms, points, skip=placed)
+        room_outline.settle_closets(home.rooms)
+        reg = room_outline.regularize_walls(home.rooms)
+        ev.emit("progress", stage="layout", message=f"{reg['shared_walls']} shared walls set {100 * reg['thickness_m']:.0f} cm "
+                f"thick, {reg['wall_lines']} wall lines straightened")
         fix_info = []
         for f in fixes:
             poly = home.rooms[f.room].polygon

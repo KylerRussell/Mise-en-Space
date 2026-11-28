@@ -51,6 +51,11 @@ Rules:
   import_product(url) and add_object(asset_id). Drop products that fail the size gate.
 - For several objects at once, propose relations with solve_layout and let the solver
   resolve collisions and clearances.
+- Finishes are part of a layout too: get_finishes shows each space's floor, walls, ceiling and
+  trim (material and color, as scanned); set_finish repaints walls, changes a floor, etc. in
+  your variant. Renders show the new colors; the user sees the repainted room in the editor.
+  Painted block walls stay block when repainted. Suggest colors as #rrggbb, with the paint's
+  name in your notes if you found it in a real paint range.
 """
 
 Scene = Annotated[str, Field(description="scene id (see list_scenes)")]
@@ -144,6 +149,30 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
         """Collisions, walkway clearance (through doors between rooms), blocked doors and windows, objects outside
         the floor or cutting through walls, ceiling height per space. Distances in meters."""
         return call("GET", f"/api/scenes/{scene}/variants/{variant}/check", params={"space": space} if space else None)
+
+    @mcp.tool()
+    def get_finishes(scene: Scene, variant: Variant = "main") -> dict:
+        """Each space's floor, walls, ceiling and trim in this layout: material (paint, wood, tile, carpet, block,
+        popcorn...), color (#rrggbb), pattern (plank direction, plank/tile/course size), single walls that differ
+        (wall_overrides: painted block, an accent wall) and which parts this variant changed."""
+        return call("GET", f"/api/scenes/{scene}/variants/{variant}/finishes")
+
+    @mcp.tool()
+    def set_finish(scene: Scene, variant: Variant, space: Annotated[str, Field(description="space id from get_room")],
+                   part: Annotated[str, Field(description=(
+                       "floor, walls (every wall of the space, block and accent walls included), ceiling, trim "
+                       "(baseboards and casings) or wall:<wall id> for one wall (an accent wall)"))] = "walls",
+                   color: Annotated[str | None, Field(description="#rrggbb")] = None,
+                   kind: Annotated[Literal["paint", "wood", "tile", "carpet", "block", "popcorn", "stone", "other"] | None,
+                                   Field(description="a new material; omit to keep it")] = None,
+                   direction_deg: Annotated[float | None, Field(description="planks/rows run this way (deg from +x)")] = None,
+                   module_m: Annotated[float | None, Field(description="plank width or tile size, m")] = None) -> dict:
+        """Repaint walls, change a floor, ceiling or trim in your variant. Fields you omit stay as they are.
+        A new material with a pattern gets one made for it in your color. The variant's empty-home splat is
+        rebuilt (about a second) so the user sees it in the editor."""
+        return call("POST", f"/api/scenes/{scene}/variants/{variant}/finishes",
+                    json={"space": space, "part": part, "color": color, "kind": kind,
+                          "direction_deg": direction_deg, "module_m": module_m})
 
     @mcp.tool()
     def create_variant(scene: Scene, name: str, base: Variant = "main", notes: str = "") -> dict:
@@ -259,7 +288,7 @@ def build_server(client: httpx.Client | None = None, backend: str | None = None)
 
     @mcp.tool()
     def diff_variants(scene: Scene, a: Variant, b: Variant) -> dict:
-        """Change list from layout a to layout b: moves, adds, removals and the cost delta."""
+        """Change list from layout a to layout b: moves, adds, removals, finish changes (paint, floors) and the cost delta."""
         return call("GET", f"/api/scenes/{scene}/diff", params={"a": a, "b": b})
 
     @mcp.tool()
