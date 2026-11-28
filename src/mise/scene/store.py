@@ -18,7 +18,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from . import checks, placement, spaces
-from .models import MAIN, LibraryAsset, Pose, Room, Scene, SceneObject, Variant, now_iso
+from .models import MAIN, LibraryAsset, Pose, Room, Scene, SceneObject, Surface, Variant, apply_finish, finish_of, now_iso
 
 Actor = Literal["user", "agent", "pipeline"]
 
@@ -32,7 +32,8 @@ class Op(BaseModel):
     ts: str = Field(default_factory=now_iso)
     actor: Actor = "user"
     variant: str = MAIN
-    kind: Literal["move", "add", "hide", "show", "delete", "update", "create_variant", "delete_variant", "library_add", "promote", "room"]
+    kind: Literal["move", "add", "hide", "show", "delete", "update", "create_variant", "delete_variant", "library_add", "promote", "room",
+                  "finish"]
     object_id: str | None = None
     before: dict | None = None
     after: dict | None = None
@@ -43,9 +44,11 @@ class Op(BaseModel):
 class Change(BaseModel):
     """One entry in a diff between two layouts."""
 
-    kind: Literal["move", "add", "remove", "restore"]
-    object_id: str
+    kind: Literal["move", "add", "remove", "restore", "finish"]
+    object_id: str  # for a finish: finish:<space id>:<part>
     name: str
+    finish_before: Surface | None = None
+    finish_after: Surface | None = None
     before: Pose | None = None
     after: Pose | None = None
     distance_m: float | None = None
@@ -151,6 +154,21 @@ class SceneStore:
     # ---- low-level state access ------------------------------------------------
     def _get_state(self, scene: Scene, variant: str, object_id: str) -> dict | None:
         """Snapshot of an object's per-variant state (None = not present)."""
+        if object_id.startswith("finish:"):
+            _, sp_id, part = object_id.split(":", 2)
+            if variant == MAIN:
+                sf = finish_of(scene.room.space(sp_id), part)
+                if part.startswith("wall:"):
+                    f = scene.room.space(sp_id).finish
+                    sf = f.wall_overrides.get(part[5:]) if f else None
+            else:
+                sf = scene.variant(variant).finishes.get(sp_id, {}).get(part)
+            if sf is None:
+                return None
+            out = {"surface": sf.model_dump()}
+            if variant == MAIN and part == "walls" and scene.room.space(sp_id).finish:  # repainting walls repaints these
+                out["overrides"] = {k: v.model_dump() for k, v in scene.room.space(sp_id).finish.wall_overrides.items()}
+            return out
         if variant == MAIN:
             for o in scene.objects:
                 if o.id == object_id:
@@ -169,6 +187,23 @@ class SceneStore:
         }
 
     def _set_state(self, scene: Scene, variant: str, object_id: str, state: dict | None) -> None:
+        if object_id.startswith("finish:"):
+            _, sp_id, part = object_id.split(":", 2)
+            sf = Surface.model_validate(state["surface"]) if state else None
+            if variant == MAIN:
+                sp = next(x for x in scene.room.own_spaces() if x.id == sp_id)
+                apply_finish(sp, part, sf)
+                if state and "overrides" in state:
+                    sp.finish.wall_overrides = {k: Surface.model_validate(v) for k, v in state["overrides"].items()}
+            else:
+                parts = scene.variant(variant).finishes.setdefault(sp_id, {})
+                if sf is None:
+                    parts.pop(part, None)
+                else:
+                    parts[part] = sf
+                if not parts:
+                    scene.variant(variant).finishes.pop(sp_id, None)
+            return
         if variant == MAIN:
             idx = next((i for i, o in enumerate(scene.objects) if o.id == object_id), None)
             if state is None:
@@ -446,6 +481,66 @@ class SceneStore:
             self._commit(scene_id, op, {"room": new.model_dump()})
             return {"op_id": op.id, "room": new.model_dump(), "violations": [v.model_dump() for v in checks.check_layout(scene)]}
 
+    # ---- finishes: paint, floors, ceilings, trim ---------------------------------
+    def set_finish(self, scene_id: str, variant: str, space: str, part: str, fields: dict,
+                   actor: Actor = "user") -> dict:
+        """Change a surface of a space in one layout: color, material (kind), direction_deg,
+        module_m. Fields not given keep what the surface has now. A new material with a pattern
+        (wood, tile, carpet, block) gets a texture made for it; the color tints it."""
+        with self._lock:
+            self._guard(actor, variant)
+            scene = self.load(scene_id)
+            room = scene.resolve_room(variant)
+            sp = room.space(space)
+            if part.startswith("wall:") and part[5:] not in {w.id for w in room.walls if w.space in (None, space)}:
+                raise KeyError(f"no wall {part[5:]!r} in space {space!r}")
+            cur = finish_of(sp, part) or Surface()
+            upd = {k: v for k, v in fields.items() if v is not None and k in ("color", "kind", "direction_deg", "module_m")}
+            if not upd:
+                raise ValueError("nothing to change: give color, kind, direction_deg or module_m")
+            new = cur.model_copy(update=upd)
+            if "kind" in upd and upd["kind"] != cur.kind:  # another material: its own pattern
+                new = new.model_copy(update={"texture": None, "size_m": 1.0,
+                                             **({} if "module_m" in upd else {"module_m": None})})
+            elif "module_m" in upd and upd["module_m"] != cur.module_m:
+                new = new.model_copy(update={"texture": None, "size_m": 1.0})
+            new = Surface.model_validate(new.model_dump())
+            if not new.texture and new.kind in ("wood", "block", "tile", "carpet"):
+                try:
+                    from ..pipeline.materials import retexture
+
+                    new = retexture(new, self.scene_dir(scene_id), f"{variant}_{space}_{part.replace(':', '-')}")
+                except ImportError:  # the scan pipeline isn't installed: flat color
+                    pass
+            oid = f"finish:{space}:{part}"
+            before = self._get_state(scene, variant, oid)
+            self._set_state(scene, variant, oid, {"surface": new.model_dump()})
+            op = Op(actor=actor, variant=variant, kind="finish", object_id=oid, before=before,
+                    after={"surface": new.model_dump()}, note=f"{sp.name} {part}: " + ", ".join(f"{k} {v}" for k, v in upd.items()))
+            splat = self.rebuild_shell(scene_id, variant)
+            self._commit(scene_id, op, {"room_splat": splat})
+            return {"op_id": op.id, "space": space, "part": part, "surface": new.model_dump(), "room_splat": splat}
+
+    def rebuild_shell(self, scene_id: str, variant: str) -> str | None:
+        """The layout's empty-home splat again from its finishes (scanned homes only: they have the
+        room's light in finishes/shading.npz). About half a second for a flat."""
+        scene = self.load(scene_id)
+        d = self.scene_dir(scene_id)
+        if not (d / "finishes" / "shading.npz").exists() or not scene.room.splat:
+            return None
+        try:
+            from ..pipeline.materials import write_shell
+        except ImportError:
+            return None
+        view = scene.model_copy(update={"room": scene.resolve_room(variant)})
+        name = "splats/empty.ply" if variant == MAIN else f"splats/empty-{variant}.ply"
+        write_shell(view, d, name)
+        if variant == MAIN:
+            scene.room.splat = name
+        else:
+            scene.variant(variant).room_splat = name
+        return name
+
     # ---- variants ------------------------------------------------------------
     def create_variant(self, scene_id: str, name: str, base: str = MAIN, actor: Actor = "user", notes: str = "") -> Variant:
         with self._lock:
@@ -500,7 +595,7 @@ class SceneStore:
         return f"{prefix}_{k}"
 
     # ---- undo / redo -----------------------------------------------------------
-    _UNDOABLE = {"move", "add", "hide", "show", "delete", "update", "promote", "room"}
+    _UNDOABLE = {"move", "add", "hide", "show", "delete", "update", "promote", "room", "finish"}
 
     def undo(self, scene_id: str, variant: str = MAIN, actor: Actor = "user") -> Op | None:
         with self._lock:
@@ -509,6 +604,8 @@ class SceneStore:
             for op in reversed(self._ops[scene_id]):
                 if op.variant == variant and op.kind in self._UNDOABLE and not op.undone:
                     self._apply_state(scene, op, use="before")
+                    if op.kind == "finish" or (op.kind == "promote" and "finish:" in json.dumps(op.after)):
+                        self.rebuild_shell(scene_id, variant)
                     op.undone = True
                     self._rewrite_log(scene_id)
                     self._save(scene_id)
@@ -531,6 +628,8 @@ class SceneStore:
             if target is None:
                 return None
             self._apply_state(scene, target, use="after")
+            if target.kind == "finish" or (target.kind == "promote" and "finish:" in json.dumps(target.after)):
+                self.rebuild_shell(scene_id, variant)
             target.undone = False
             self._rewrite_log(scene_id)
             self._save(scene_id)
@@ -584,6 +683,23 @@ class SceneStore:
                     delta += price
                     currency = currency or oa.product.currency
                 changes.append(Change(kind="remove", object_id=oid, name=oa.name, before=oa.pose, cost=price))
+        ra, rb = scene.resolve_room(a), scene.resolve_room(b)
+        for sp in rb.space_list():
+            spa = next((x for x in ra.space_list() if x.id == sp.id), None)
+            if spa is None:
+                continue
+            parts = ["floor", "walls", "ceiling", "trim"] + [f"wall:{w}" for w in sorted(
+                set((sp.finish.wall_overrides if sp.finish else {}) | (spa.finish.wall_overrides if spa.finish else {})))]
+            for part in parts:
+                fa, fb = finish_of(spa, part), finish_of(sp, part)
+                if part.startswith("wall:"):  # one wall: only where it differs from the room's walls
+                    fa = (spa.finish.wall_overrides.get(part[5:]) if spa.finish else None)
+                    fb = (sp.finish.wall_overrides.get(part[5:]) if sp.finish else None)
+                if (fa.model_dump() if fa else None) == (fb.model_dump() if fb else None):
+                    continue
+                desc = lambda f: "none" if f is None else " ".join(x for x in (f.kind, f.color) if x)  # noqa: E731
+                changes.append(Change(kind="finish", object_id=f"finish:{sp.id}:{part}",
+                                      name=f"{sp.name} {part}: {desc(fa)} -> {desc(fb)}", finish_before=fa, finish_after=fb))
         return Diff(a=a, b=b, changes=changes, cost_delta=round(delta, 2), currency=currency)
 
     def promote(self, scene_id: str, variant: str, object_ids: list[str] | None = None, actor: Actor = "user") -> dict:
@@ -598,6 +714,12 @@ class SceneStore:
             resolved = {o.id: o for o in scene.resolve(variant, include_hidden=True)}
             for c in chosen:
                 prev = self._get_state(scene, MAIN, c.object_id)
+                if c.kind == "finish":
+                    new = {"surface": c.finish_after.model_dump()} if c.finish_after else None
+                    before.append({"id": c.object_id, "state": prev})
+                    after.append({"id": c.object_id, "state": new})
+                    self._set_state(scene, MAIN, c.object_id, new)
+                    continue
                 if c.kind in ("move", "add", "restore"):
                     obj = resolved[c.object_id].model_copy(deep=True)
                     if obj.source == "scanned" and c.kind == "move":
@@ -610,5 +732,7 @@ class SceneStore:
                 self._set_state(scene, MAIN, c.object_id, new)
             op = Op(actor=actor, variant=MAIN, kind="promote", before={"objects": before}, after={"objects": after},
                     note=f"from {variant}: " + ", ".join(f"{c.kind} {c.object_id}" for c in chosen))
+            if any(c.kind == "finish" for c in chosen):
+                self.rebuild_shell(scene_id, MAIN)
             self._commit(scene_id, op)
             return {"op_id": op.id, "promoted": [c.model_dump() for c in chosen]}

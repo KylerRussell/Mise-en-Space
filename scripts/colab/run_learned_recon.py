@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -89,20 +90,26 @@ def main(argv=None) -> None:
     ap.add_argument("--cameras", type=Path, help="with --render: cameras.json (from splat_train.py)")
     ap.add_argument("--names", nargs="*", help="with --render: frames to render (default 8 spread over the cameras)")
     ap.add_argument("--segment", action="store_true", help="label the frames' pixels instead (segment_frames.py)")
+    ap.add_argument("--idol", type=Path, help="product images to 3D splats instead (idol_run.py): a folder with "
+                    "images.json ([{name, mode}]) and the images; sends this machine's Hugging Face token")
     ap.add_argument("--labels", type=Path, help="with --splat: segment_frames.py output, to label every Gaussian")
     ap.add_argument("--scene-from", type=Path, help="with --splat: a scan's result.json; train in that scene's frame")
     a, extra = ap.parse_known_args(argv)  # anything else goes to the remote script (--chunk, --steps, ...)
     session = f"mise-{a.name}"
-    kind = "renders" if a.render else "splats" if a.splat else "semantic" if a.segment else "learned"
+    kind = "idol" if a.idol else "renders" if a.render else "splats" if a.splat else "semantic" if a.segment else "learned"
     out = a.out or Path("data/scans") / kind / a.name
     script = {"splats": "splat_train.py", "semantic": "segment_frames.py", "learned": "learned_recon.py",
-              "renders": "render_splat.py"}[kind]
+              "renders": "render_splat.py", "idol": "idol_run.py"}[kind]
     if a.render:  # the frames to look from
         cams = json.loads(a.cameras.read_text())
         names = a.names or [cams[i]["name"] for i in [round(k * (len(cams) - 1) / 7) for k in range(8)]]
         a.names = names
 
-    kept = json.loads((a.frames / "frames.json").read_text())
+    if a.idol:  # no frames: the product images, and the token for Idol's gated encoders
+        a.frames = a.idol
+        kept = []
+    else:
+        kept = json.loads((a.frames / "frames.json").read_text())
     if a.render:
         kept = [k for k in kept if k["name"] in set(a.names)]
     if a.splat:  # the frames the solve has
@@ -115,6 +122,13 @@ def main(argv=None) -> None:
     with tarfile.open(pack, "w:gz") as tar:
         for k in sel:
             tar.add(a.frames / "frames" / k["name"], f"in/frames/{k['name']}")
+        if a.idol:
+            for j in json.loads((a.idol / "images.json").read_text()):
+                tar.add(a.idol / j["name"], f"in/images/{j['name']}")
+            tar.add(a.idol / "images.json", "in/images.json")
+            tok = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "token"
+            if tok.exists():  # to the run's own VM only; idol_run.py moves it into the VM's HF cache
+                tar.add(tok, "in/hf_token")
         info = tarfile.TarInfo("in/frames.json")
         data = json.dumps(sel).encode()
         info.size = len(data)
@@ -135,7 +149,9 @@ def main(argv=None) -> None:
                 tar.add(_base_colour(pth, tmp / f"splat_{k}.ply"), f"in/splat_{k}.ply")
             tar.add(a.cameras, "in/cameras.json")
 
-    if a.render:
+    if a.idol:
+        args = ["--images", "/content/in/images", "--out", "/content/out", *extra]
+    elif a.render:
         args = ["--splats", *[f"/content/in/splat_{k}.ply" for k in range(len(a.render))], "--cameras",
                 "/content/in/cameras.json", "--frames", "/content/in/frames", "--out", "/content/out",
                 "--names", *a.names, *extra]
@@ -246,7 +262,7 @@ print("@@EXIT@@", open("/content/exit_code").read().strip() if os.path.exists("/
             log, _, tail = text.rpartition("@@EXIT@@")
             lines = log.rstrip("\n").splitlines()
             for line in lines[seen:]:
-                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line or "[splat]" in line or "[seg]" in line or "[render]" in line or 'File "' in line:
+                if not line.startswith(("  ", "Downloading", "Fetching")) or "[recon]" in line or "[splat]" in line or "[seg]" in line or "[render]" in line or "[idol]" in line or 'File "' in line:
                     print("  " + line[-300:], flush=True)
             seen = len(lines)
             code = int(tail.strip()) if tail.strip() else None
@@ -274,6 +290,9 @@ print("@@EXIT@@", open("/content/exit_code").read().strip() if os.path.exists("/
         print(f"done in {(time.time() - started) / 60:.1f} min: {out}", flush=True)
         print(json.dumps({k: v for k, v in meta.items() if k != "chunks"}, indent=1))
     finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)  # the packed inputs (with the token, for --idol)
         if a.keep:
             print(f"left {session} running: colab --config {CONFIG} stop -s {session}")
         else:

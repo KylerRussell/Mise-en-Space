@@ -296,16 +296,13 @@ def cmd_splat_home(args):
 
 def cmd_shell_render(args):
     """The empty home again from the scene's finishes (after a repaint or a new floor)."""
-    from .pipeline import ply
-    from .pipeline.materials import finish_summary, render_shell
+    from .pipeline.materials import finish_summary, write_shell
     from .scene.models import Scene
 
     d = Path(args.data) / args.scene
     scene = Scene.model_validate_json((d / "scene.json").read_text())
-    out = render_shell(scene, d, lighting=not args.flat)
-    (d / "splats").mkdir(exist_ok=True)
-    ply.write_ply(d / "splats" / args.name, out)
-    print(json.dumps({"path": f"splats/{args.name}", "gaussians": len(out), "finishes": finish_summary(scene)}, indent=1))
+    n = write_shell(scene, d, f"splats/{args.name}", lighting=not args.flat)
+    print(json.dumps({"path": f"splats/{args.name}", "gaussians": n, "finishes": finish_summary(scene)}, indent=1))
 
 
 def cmd_scene_splat(args):

@@ -59,6 +59,22 @@ def _dashed(dr, a, b, color, width=2, dash=10):
         dr.line([tuple(a + u * t), tuple(a + u * min(t + dash, L))], fill=color, width=width)
 
 
+def _finish_rgb(room: Room, space_id: str | None, part: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
+    """A space's floor / walls / ceiling color (a wall's own, for wall:<id>), or the default."""
+    sp = next((x for x in room.space_list() if x.id == space_id), None) if space_id else None
+    if sp is None or sp.finish is None:
+        return default
+    f = sp.finish
+    sf = (f.wall_overrides.get(part[5:]) or f.walls) if part.startswith("wall:") else getattr(f, part, None)
+    return _hex(sf.color)[:3] if sf is not None and sf.color else default
+
+
+def _wall_rgb(room: Room, w) -> tuple[int, int, int]:
+    sid = w.space or (room.space_at(*((np.array(w.a) + np.array(w.b)) / 2 + g.wall_inward_normal(w, room) * 0.1)) or
+                      type("S", (), {"id": None})).id
+    return _finish_rgb(room, sid, f"wall:{w.id}", (245, 243, 238))
+
+
 def render_plan(room: Room, objects: list[SceneObject], violations: list[Violation] | None = None,
                 px_per_m: int = 120, margin: float = 0.4, show_dims: bool = True, focus: str | None = None,
                 space: str | None = None) -> tuple[bytes, dict[int, str]]:
@@ -92,12 +108,15 @@ def render_plan(room: Room, objects: list[SceneObject], violations: list[Violati
         dr.line([P((lo[0], gy)), P((hi[0], gy))], fill=(0, 0, 0, 18))
     for sp_ in spaces:
         pl = np.asarray(sp_.polygon, float)
-        fill = (255, 255, 255, 255) if not space or sp_.id == space else (243, 242, 238, 255)
+        fl = _finish_rgb(room, sp_.id, "floor", (255, 255, 255))  # the floor's color, pale: labels stay legible
+        fill = tuple(int(255 - (255 - c) * 0.35) for c in fl) + (255,) if not space or sp_.id == space else (243, 242, 238, 255)
         dr.polygon([P(p) for p in pl], fill=fill)
         for i in range(len(pl)):  # space outlines show as faint dashes where there is no wall
             _dashed(dr, P(pl[i]), P(pl[(i + 1) % len(pl)]), (150, 150, 150, 160))
     for w in room.walls:
         dr.line([P(w.a), P(w.b)], fill=(40, 40, 40, 255), width=5)
+        n = g.wall_inward_normal(w, room) * (5 / px_per_m)  # the wall's paint, a band on its room side
+        dr.line([P(np.array(w.a) + n), P(np.array(w.b) + n)], fill=(*_wall_rgb(room, w), 255), width=4)
     if multi:
         big = max(16, px_per_m // 5)
         for sp_ in spaces:  # name in the space's top-left corner, clear of most furniture
@@ -204,6 +223,24 @@ def render_perspective(room: Room, objects: list[SceneObject], eye: tuple[float,
             return None, z
         return (W / 2 + f * float(v @ right) / z, H / 2 - f * float(v @ up) / z), z
 
+    def proj_poly(pts):
+        """A polygon cut at the near plane (a floor runs under the viewer), then projected."""
+        near = 0.05
+        zs = [float((q - eye_v) @ fwd) for q in pts]
+        out = []
+        for i in range(len(pts)):
+            a, b, za, zb = pts[i], pts[(i + 1) % len(pts)], zs[i], zs[(i + 1) % len(pts)]
+            if za >= near:
+                out.append(a)
+            if (za >= near) != (zb >= near):
+                out.append(a + (b - a) * ((near - za) / (zb - za)))
+        if len(out) < 3:
+            return None, None
+        pr = [proj(q) for q in out]
+        if any(p[0] is None for p in pr):
+            return None, None
+        return [p[0] for p in pr], [p[1] for p in pr]
+
     img = Image.new("RGBA", (W, H), (236, 233, 226, 255))
     dr = ImageDraw.Draw(img, "RGBA")
     polys = []  # (depth, pts, fill, outline)
@@ -212,13 +249,13 @@ def render_perspective(room: Room, objects: list[SceneObject], eye: tuple[float,
         a, b = np.array([*w.a, 0.0]), np.array([*w.b, 0.0])
         h = w.height or room.ceiling_height
         quad = [a, b, b + [0, 0, h], a + [0, 0, h]]
-        pr = [proj(q) for q in quad]
-        if all(p[0] is not None for p in pr):
-            polys.append((max(p[1] for p in pr) + 100, [p[0] for p in pr], (245, 243, 238, 255), (180, 175, 165, 255)))
-    for pl in room.polygons():  # floors
-        fl = [proj(np.array([*p, 0.0])) for p in pl]
-        if all(p[0] is not None for p in fl):
-            polys.append((1e9, [p[0] for p in fl], (214, 200, 178, 255), (150, 140, 120, 255)))
+        pts, zs = proj_poly(quad)
+        if pts:
+            polys.append((max(zs) + 100, pts, (*_wall_rgb(room, w), 255), (180, 175, 165, 255)))
+    for sp_ in room.space_list():  # floors, in their own color
+        pts, _ = proj_poly([np.array([*p, 0.0]) for p in sp_.polygon])
+        if pts:
+            polys.append((1e9, pts, (*_finish_rgb(room, sp_.id, "floor", (214, 200, 178)), 255), (150, 140, 120, 255)))
     for op in room.openings:
         quad = [np.array(q) for q in g.opening_polygon(op, room)]
         quad = [q + np.array([*g.wall_inward_normal(room.wall(op.wall), room), 0]) * 0.01 for q in quad]

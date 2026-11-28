@@ -487,9 +487,27 @@ def _albedo(sf, s: dict, cell: float, scene_dir: Path, rng: np.random.Generator)
     return small[row, col]
 
 
+def ceiling_path(path: Path) -> Path:
+    """Where a shell's ceilings go: next to it (splats/empty.ply -> splats/empty-ceiling.ply)."""
+    return Path(path).with_name(Path(path).stem + "-ceiling.ply")
+
+
+def write_shell(scene, scene_dir: Path, rel: str, lighting: bool = True) -> int:
+    """The empty home as two splats: walls and floors at `rel`, ceilings beside it (ceiling_path), so
+    a view from above (the editor's orbit and plan) can leave the ceilings out. Returns the count."""
+    walls = render_shell(scene, scene_dir, lighting=lighting, ceilings=False)
+    ceil = render_shell(scene, scene_dir, lighting=lighting, ceilings="only")
+    out = Path(scene_dir) / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    ply.write_ply(out, walls)
+    ply.write_ply(ceiling_path(out), ceil)
+    return len(walls) + len(ceil)
+
+
 def render_shell(scene, scene_dir: Path, cell: float = 0.025, floor_cell: float = 0.0125,
-                 lighting: bool = True) -> ply.Splat:
-    """The empty home from the scene's finishes (and the shading maps, unless lighting=False)."""
+                 lighting: bool = True, ceilings: bool | str = True) -> ply.Splat:
+    """The empty home from the scene's finishes (and the shading maps, unless lighting=False).
+    ceilings: True (all of it), False (without them) or "only"."""
     import cv2
 
     scene_dir = Path(scene_dir)
@@ -502,6 +520,8 @@ def render_shell(scene, scene_dir: Path, cell: float = 0.025, floor_cell: float 
     fine = {s["id"]: s for s in _surfaces(scene.room, floor_cell)}
     finish_of = {sp.id: sp.finish for sp in scene.room.spaces}
     for s0 in _surfaces(scene.room, cell):
+        if (s0["kind"] == "ceiling") != (ceilings == "only") and ceilings is not True:
+            continue
         sf = _material_of(scene, s0)
         if sf is None:
             continue
@@ -554,3 +574,51 @@ def finish_summary(scene) -> dict:
             d["wall_overrides"] = {k: (v.kind, v.color) for k, v in f.wall_overrides.items()}
         out[sp.name] = d
     return json.loads(json.dumps(out))
+
+
+# ---- a surface changed to another material (a new floor, block painted over...) ---------------
+
+def retexture(sf, scene_dir: Path, name: str, seed: int = 0):
+    """The surface with a texture made for its material, when it changed to one with a pattern
+    (wood planks, painted block, tile, carpet) and has none; flat paint needs none. The texture
+    is written under finishes/ and only carries the pattern: the surface's color tints it."""
+    import hashlib
+
+    import cv2
+
+    if sf.texture or sf.kind not in ("wood", "block", "tile", "carpet"):
+        return sf
+    rng = np.random.default_rng(seed)
+    color = sf.color or "#b0a898"
+    n = 256
+    if sf.kind == "wood":
+        w = float(np.clip(sf.module_m or 0.19, 0.08, 0.3))
+        grain = cv2.GaussianBlur(rng.normal(0, 1, (n, n)).astype(np.float32), (0, 0), sigmaX=0.6, sigmaY=9)
+        detail = np.repeat((1 + 0.06 * grain / max(grain.std(), 1e-6))[..., None], 3, -1)
+        tex, size = fin.plank_texture(detail, color, w, planks=max(6, int(np.ceil(1.2 / w))), px_per_m=256, seed=seed)
+        sf = sf.model_copy(update={"module_m": w, "direction_deg": sf.direction_deg if sf.direction_deg is not None else 0.0})
+    elif sf.kind == "block":
+        c = sf.module_m or 0.203
+        tex, size = fin.block_texture(color, None, block_m=(2 * c, c), px_per_m=256, joint=0.94)
+        sf = sf.model_copy(update={"module_m": c})
+    elif sf.kind == "tile":
+        t = float(np.clip(sf.module_m or 0.3, 0.05, 1.2))
+        k = 2 if t >= 0.2 else 4
+        size, m = k * t, round(k * t * 256)
+        tex = np.ones((m, m, 3), np.float32) * fin.hex_to_bgr(color)
+        tex *= 1 + 0.02 * cv2.GaussianBlur(rng.normal(0, 1, (m, m)).astype(np.float32), (0, 0), 3)[..., None]
+        g = max(2, round(0.004 * 256))
+        for i in range(k):
+            tex[round(i * m / k):round(i * m / k) + g] *= 0.8
+            tex[:, round(i * m / k):round(i * m / k) + g] *= 0.8
+        tex = np.clip(tex, 0, 255).astype(np.uint8)
+        sf = sf.model_copy(update={"module_m": t})
+    else:  # carpet: pile
+        pile = cv2.GaussianBlur(rng.normal(0, 1, (n, n)).astype(np.float32), (0, 0), 1.2)
+        detail = np.repeat((1 + 0.08 * pile / max(pile.std(), 1e-6))[..., None], 3, -1)
+        tex, size = fin.tileable(fin.tint(detail, color)), 1.0
+    (scene_dir / "finishes").mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(f"{name}{sf.kind}{sf.module_m}{seed}".encode()).hexdigest()[:8]
+    fn = f"finishes/{name}_{sf.kind}_{key}.jpg"
+    cv2.imwrite(str(scene_dir / fn), tex)
+    return sf.model_copy(update={"texture": fn, "size_m": round(float(size), 3)})

@@ -33,6 +33,8 @@ export const api = {
   diff: (s, a, b) => req("GET", `/api/scenes/${enc(s)}/diff?a=${enc(a)}&b=${enc(b)}`),
   promote: (s, v, ids) => req("POST", `${V(s, v)}/promote`, { object_ids: ids }),
   shopping: (s, v) => req("GET", `${V(s, v)}/shopping`),
+  finishes: (s, v) => req("GET", `${V(s, v)}/finishes`),
+  setFinish: (s, v, body) => req("POST", `${V(s, v)}/finishes`, body),
   library: (s) => req("GET", `/api/scenes/${enc(s)}/library`),
   upload: (s, body) => req("POST", `/api/scenes/${enc(s)}/library/upload`, body),
   startImport: (s, body) => req("POST", `/api/scenes/${enc(s)}/imports`, body),

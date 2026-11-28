@@ -291,9 +291,14 @@ def add_scanned_objects(scene_dir: Path, splat_dir: Path) -> dict:
 def compose(scene, scene_dir: Path, variant: str = "main", fixtures: bool = True):
     """One splat of a layout: the room's splat (the empty home) with every splat object where the
     layout puts it. For renders outside the editor; the editor composes the same way."""
+    from .materials import ceiling_path
+
     parts = []
-    if scene.room.splat and (scene_dir / scene.room.splat).exists():
-        parts.append(ply.read_ply(scene_dir / scene.room.splat))
+    room_splat = (scene.variant(variant).room_splat if variant != "main" else None) or scene.room.splat
+    if room_splat and (scene_dir / room_splat).exists():
+        parts.append(ply.read_ply(scene_dir / room_splat))
+        if ceiling_path(scene_dir / room_splat).exists():  # the shell's ceilings, kept beside it
+            parts.append(ply.read_ply(ceiling_path(scene_dir / room_splat)))
     for o in scene.resolve(variant):
         if (not fixtures and o.fixture) or o.asset_kind != "splat" or not o.asset:
             continue

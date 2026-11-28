@@ -35,6 +35,15 @@ EDITOR_DIST = Path(os.environ.get("MISE_EDITOR_DIST", Path(__file__).resolve().p
 
 # ---- request bodies -----------------------------------------------------------
 
+class FinishBody(BaseModel):
+    space: str
+    part: str = "walls"  # floor, walls, ceiling, trim or wall:<wall id>
+    color: str | None = None
+    kind: str | None = None
+    direction_deg: float | None = None
+    module_m: float | None = None
+
+
 class MoveBody(BaseModel):
     x: float | None = None
     y: float | None = None
@@ -229,6 +238,13 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
         except ValueError as e:
             raise HTTPException(422, str(e))
 
+    def versioned(scene_id: str, path: str | None) -> str | None:
+        """A file path with its modified time as a query, so a rebuilt splat isn't served from cache."""
+        if not path:
+            return None
+        f = store.scene_dir(scene_id) / path
+        return f"{path}?v={int(f.stat().st_mtime * 1000)}" if f.exists() else path
+
     def variant_ok(scene: Scene, variant: str) -> None:
         if variant != MAIN:
             guard(scene.variant, variant)
@@ -257,8 +273,9 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
     def get_room(scene_id: str, variant: str = MAIN):
         from ..scene import geometry as g
         import numpy as np
-        s = scene_or_404(scene_id)
-        variant_ok(s, variant)
+        s0 = scene_or_404(scene_id)
+        variant_ok(s0, variant)
+        s = s0.model_copy(update={"room": s0.resolve_room(variant)})
         objs = s.resolve(variant)
         floor_objs = [o for o in objs if o.support == "floor" and o.category not in checks.FLOOR_IGNORED]
         # free area per space, approximated by footprint union on a grid
@@ -288,6 +305,9 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
                        "inward_normal": [round(float(v), 4) for v in g.wall_inward_normal(w, s.room)]} for w in s.room.walls],
             "openings": [{**o.model_dump(), "polygon": g.opening_polygon(o, s.room)} for o in s.room.openings],
             "rules": s.rules.model_dump(),
+            "splat": versioned(scene_id, splat := (s0.variant(variant).room_splat if variant != MAIN else None) or s0.room.splat),
+            "ceiling_splat": versioned(scene_id, c) if splat and (store.scene_dir(scene_id) / (
+                c := str(Path(splat).with_name(Path(splat).stem + "-ceiling.ply")))).exists() else None,
         }
 
     # ---- spaces (rooms and zones); only you can edit them -----------------------------
@@ -380,6 +400,31 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
     def delete_variant(scene_id: str, variant: str, x_actor: str | None = Header(None)):
         guard(store.delete_variant, scene_id, variant, actor_of(x_actor))
         return {"deleted": variant}
+
+    # ---- finishes (paint, floors, ceilings, trim) per layout -----------------------
+    @app.get("/api/scenes/{scene_id}/variants/{variant}/finishes")
+    def get_finishes(scene_id: str, variant: str):
+        from ..scene.models import FINISH_PARTS, finish_of
+        s = scene_or_404(scene_id)
+        variant_ok(s, variant)
+        room = s.resolve_room(variant)
+        out = []
+        for sp in room.space_list():
+            parts = {k: (f.model_dump(exclude_none=True) if (f := finish_of(sp, k)) else None) for k in FINISH_PARTS}
+            walls = {w.id: sp.finish.wall_overrides[w.id].model_dump(exclude_none=True)
+                     for w in room.walls if sp.finish and w.id in sp.finish.wall_overrides}
+            out.append({"space": sp.id, "name": sp.name, **parts, "wall_overrides": walls,
+                        "baseboard_m": sp.finish.baseboard_m if sp.finish else None,
+                        "changed": sorted(s.variant(variant).finishes.get(sp.id, {})) if variant != MAIN else []})
+        splat = s.room.splat if variant == MAIN else (s.variant(variant).room_splat or s.room.splat)
+        return {"spaces": out, "room_splat": splat,
+                "kinds": ["paint", "wood", "tile", "carpet", "block", "popcorn", "stone", "other"]}
+
+    @app.post("/api/scenes/{scene_id}/variants/{variant}/finishes")
+    def set_finish(scene_id: str, variant: str, body: FinishBody, x_actor: str | None = Header(None)):
+        scene_or_404(scene_id)
+        return guard(store.set_finish, scene_id, variant, body.space, body.part,
+                     body.model_dump(exclude={"space", "part"}), actor=actor_of(x_actor))
 
     @app.get("/api/scenes/{scene_id}/variants/{variant}/objects")
     def list_objects(scene_id: str, variant: str, include_hidden: bool = False, space: str | None = None):
@@ -495,7 +540,8 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
             objs = [o for o in objs if not o.fixture]
         e = tuple(map(float, eye.split(","))) if eye else None
         t = tuple(map(float, target.split(","))) if target else None
-        png, labels = guard(render.render_view, s.room, objs, view, checks.check_objects(s.room, objs, s.rules),
+        room = s.resolve_room(variant)
+        png, labels = guard(render.render_view, room, objs, view, checks.check_objects(room, objs, s.rules),
                             object_id, e, t, space)
         headers = {"X-Label-Map": json.dumps(labels)} if labels_header else {}
         return Response(png, media_type="image/png", headers=headers)
