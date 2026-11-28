@@ -80,7 +80,7 @@ def score_up(points: np.ndarray, up: np.ndarray, weights: np.ndarray | None = No
 
 def orient(points: np.ndarray, weights: np.ndarray | None = None, up_hint: np.ndarray | None = None,
            camera_dir: np.ndarray | None = None, ambiguity_margin: float = 0.15,
-           upright_only: bool = True) -> Orientation:
+           upright_only: bool = True, up_certain: bool = False) -> Orientation:
     """Compute the canonical transform for an object's point set (asset units).
 
     up_hint: a declared up axis (e.g. +Y for Idol Max GLBs); it gets a strong prior.
@@ -88,6 +88,9 @@ def orient(points: np.ndarray, weights: np.ndarray | None = None, up_hint: np.nd
     upright_only: False skips the up/down search (see module docstring).
     """
     pts = np.asarray(points, dtype=np.float64)
+    if up_certain and up_hint is not None:  # the generator states its up axis (Idol: +y): no search
+        up = np.asarray(up_hint, float)
+        return _finish(pts, up / np.linalg.norm(up), camera_dir, score=1.0, ambiguous=False, candidates=[], notes=[])
     if not upright_only:
         up = np.asarray(up_hint, float) if up_hint is not None else np.array([0.0, 0.0, 1.0])
         return _finish(pts, up / np.linalg.norm(up), camera_dir, score=1.0, ambiguous=False, candidates=[],

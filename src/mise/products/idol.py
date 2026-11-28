@@ -47,6 +47,8 @@ class IdolResult:
     up_axis: tuple[float, float, float] | None  # declared up in asset frame, if known
     raw: dict
     cost_usd: float | None = None
+    camera_dir: tuple[float, float, float] | None = None  # from the input camera toward the object, asset frame
+    up_certain: bool = False  # up_axis is the generator's convention, not a guess
 
 
 class IdolError(RuntimeError):
@@ -184,4 +186,21 @@ class IdolColab:
         dest = out_dir / "model.ply"
         dest.write_bytes(ply_path.read_bytes())
         meta = json.loads((run_out / "meta.json").read_text()) if (run_out / "meta.json").exists() else {}
-        return IdolResult(kind="splat", path=dest, up_axis=None, raw=meta)
+        cam = run_out / "product_camera.json"
+        return IdolResult(kind="splat", path=dest, up_axis=IDOL_PLY_UP, raw=meta, up_certain=True,
+                          camera_dir=idol_camera_dir(json.loads(cam.read_text())) if cam.exists() else None)
+
+
+# Idol works z-up; its save_ply turns that +90 degrees about x "to y-up", which sends +z to -y: in the saved
+# .ply up is -y (checked on real photos and product shots: +y up puts every object on its head).
+IDOL_PLY_UP = (0.0, -1.0, 0.0)
+
+
+def idol_camera_dir(cam: dict) -> tuple[float, float, float]:
+    """Idol's predicted input camera (yaw, pitch about its z-up object) as the direction from the camera
+    toward the object in the saved .ply's y-up frame (save_ply maps (x, y, z) -> (x, -z, y))."""
+    import math
+
+    yaw, pitch = float(cam["yaw"]), float(cam.get("pitch", 0.0))
+    d = (math.sin(yaw) * math.cos(pitch), math.cos(yaw) * math.cos(pitch), math.sin(pitch))  # toward the camera, z-up
+    return (-d[0], d[2], -d[1])

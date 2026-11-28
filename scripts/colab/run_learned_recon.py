@@ -125,6 +125,8 @@ def main(argv=None) -> None:
         if a.idol:
             for j in json.loads((a.idol / "images.json").read_text()):
                 tar.add(a.idol / j["name"], f"in/images/{j['name']}")
+                if j.get("hint"):
+                    tar.add(a.idol / j["hint"], f"in/images/{j['hint']}")
             tar.add(a.idol / "images.json", "in/images.json")
             tok = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "token"
             if tok.exists():  # to the run's own VM only; idol_run.py moves it into the VM's HF cache

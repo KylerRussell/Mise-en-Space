@@ -122,6 +122,50 @@ def test_idol_on_colab_runs_the_launcher_and_returns_the_splat(tmp_path):
         return 0 if inp else 1
 
     res = IdolColab(repo=tmp_path, runner=runner).generate(str(img), tmp_path / "gen", image_type="synthetic")
-    assert res.kind == "splat" and res.path.exists() and res.up_axis is None
+    assert res.kind == "splat" and res.path.exists() and res.up_axis == (0.0, -1.0, 0.0) and res.up_certain
     assert seen["jobs"] == [{"name": "product.jpg", "mode": "synthetic"}]
     assert "--num-gaussians" in seen["cmd"] and seen["cmd"][2].startswith("idol-")
+
+
+def test_idol_camera_is_turned_into_the_saved_frame():
+    import math
+
+    from mise.products.idol import idol_camera_dir
+
+    # camera straight in front along Idol's +y (yaw 0), level: it looks along -y in Idol's z-up frame,
+    # which save_ply writes as +z... toward the object = -(0, 0, 1) in the y-up file
+    d = idol_camera_dir({"yaw": 0.0, "pitch": 0.0})
+    assert all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(d, (0.0, 0.0, -1.0)))
+    d = idol_camera_dir({"yaw": math.pi / 2, "pitch": 0.0})  # from +x
+    assert all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(d, (-1.0, 0.0, 0.0)))
+
+
+def test_idol_object_is_placed_upright_headed_and_scaled(tmp_path):
+    """A box-shaped Idol splat (saved the way Idol saves: up = -y) lands in the scanned box's frame:
+    base on the floor, width along +x, scaled to the scanned size."""
+    import math
+
+    import numpy as np
+
+    from mise.pipeline import object_views as ov
+    from mise.pipeline import ply
+    from mise.scene.models import Dims, Pose, SceneObject
+
+    rng = np.random.default_rng(0)
+    # Idol's own frame (z up): 2 wide (x), 1 deep (y), 0.5 high, sitting on z = 0
+    P = rng.uniform([-1, -0.5, 0], [1, 0.5, 0.5], (4000, 3))
+    saved = np.stack([P[:, 0], -P[:, 2], P[:, 1]], 1)  # Idol's save_ply
+    n = len(saved)
+    s = ply.Splat(xyz=saved.astype(np.float32), f_dc=np.zeros((n, 3), np.float32), f_rest=None,
+                  opacity=np.full(n, 5.0, np.float32), scale=np.full((n, 3), -5.0, np.float32),
+                  rot=np.tile([1.0, 0, 0, 0], (n, 1)).astype(np.float32))
+    ply.write_ply(tmp_path / "o.ply", s)
+    o = SceneObject(id="scan_sofa_1", name="Sofa", dims=Dims(w=1.0, d=0.5, h=0.25), pose=Pose(x=3, y=2, z=0, yaw=30))
+    # the camera saw it from Idol's +y side (yaw 0); in the room that side faces the object's local +y
+    a = math.radians(30 + 90)
+    view = ov.View(o.id, "f.jpg", (0, 0, 10, 10), 1.0, 1.0, (-math.cos(a), -math.sin(a), 0.0))
+    out, fit = ov.place(o, view, tmp_path / "o.ply", {"yaw": 0.0, "pitch": 0.0})
+    lo, hi = np.percentile(out.xyz, 1, 0), np.percentile(out.xyz, 99, 0)
+    assert abs(lo[2]) < 0.02 and abs(hi[2] - 0.25) < 0.02  # upright, base at 0
+    assert abs((hi - lo)[0] - 1.0) < 0.05 and abs((hi - lo)[1] - 0.5) < 0.05  # width along x, scaled by 0.5
+    assert fit["anisotropy"] < 1.05

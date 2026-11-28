@@ -363,6 +363,24 @@ retried, and can render splats from given cameras (`--render A.ply B.ply --camer
   wall, FULLMAKT rug, POÄNG facing the sofa, BILLY on the west wall), no new hard violations,
   shopping list $527.99. Not judged by the owner yet.
 
+## Idol running, and scanned objects rebuilt by it (2026-11-28)
+
+- **Idol runs on Colab** (`scripts/colab/idol_run.py`). While Meta's hand approval of DINOv3 was pending it ran
+  with timm's ungated port of the same weights (`--dinov3 auto` picks the official one when the account
+  may use it, as it now can). About 55 s per object on an A100, 76-100 s to load.
+- **Idol's saved .ply is up = -y**, not y-up as its docstring says (`save_ply` turns z-up +90 deg about x).
+  `products/idol.py` `IDOL_PLY_UP`; the importer trusts it (`up_certain`) and takes the front from Idol's
+  predicted input camera (`idol_camera_dir`). POÄNG and BILLY import with anisotropy 1.03 and 1.09.
+- **Scanned objects from the video, made whole** (`pipeline/object_views.py`): the best frame of each
+  object (wholly in view, large, labelled as that kind), a crop with a hint mask from the labels; on
+  the VM BiRefNet's cut-out is kept only where it meets the hint. `place` heads Idol's object from its
+  predicted camera and the frame's camera, scales it to the scanned box, and `adopt` swaps it in where
+  the cut-out covered >= 30% of the hint (`objects/<id>-idol.ply`; the scanned splat stays). On home-v4:
+  16 tried, 10 adopted (bin, toy box, office chair, stools, sofa, cube shelf, two plants, side table,
+  desk), 5 rejected by the rule (built-in cabinets and a wall the scan had called storage, a blurred
+  dresser, the monitors), the kitchen counter skipped by eye. Run by hand this time (crops ->
+  `run_learned_recon.py NAME --idol DIR` -> `adopt`); `scene.before-idol.json` is the scene before.
+
 ## Next steps
 
 1. Stage 1 loose ends: the main room's 4.88 m span (-6%: the outline stops at the desk), the

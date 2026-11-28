@@ -129,7 +129,9 @@ def run_import(req: ImportRequest, out_dir: Path, generator: Generator | None,
             res = generator.generate(img, adir / f"gen{len(attempts)}", image_type=image_type, mesh=req.mesh)
             pts, w = _points_from_result(res)
             o = orient.orient(pts, w, up_hint=np.array(res.up_axis) if res.up_axis else None, upright_only=upright,
-                              camera_dir=np.array(req.camera_dir) if req.camera_dir else None)
+                              up_certain=bool(getattr(res, "up_certain", False)),
+                              camera_dir=np.array(req.camera_dir) if req.camera_dir else
+                              (np.array(res.camera_dir) if getattr(res, "camera_dir", None) else None))
             fit = scale_fit.fit_scale(listed, o.dims, req.accept, req.warn, allow_tipping=not upright)
         except Exception as e:  # keep going with the next image
             attempts.append({"image": img, "image_type": image_type, "error": str(e)})
