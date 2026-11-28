@@ -336,6 +336,33 @@ The Colab launcher sends inputs in 40 MB pieces (one region refused ~90 MB in on
 retried, and can render splats from given cameras (`--render A.ply B.ply --cameras cameras.json`,
 `render_splat.py`).
 
+## Stages 3-6 on the scanned home (2026-11-28)
+
+- **Finishes per layout.** Paint, floors, ceilings, trim and single walls are part of a layout
+  (`Variant.finishes`, `Scene.resolve_room`), changed by `SceneStore.set_finish` as an undoable op,
+  listed in diffs (`kind: "finish"`) and promoted like furniture. A new material with a pattern gets
+  a made texture (`materials.retexture`); repainting a room's walls repaints its painted block too.
+  Each change rebuilds the layout's shell splat in about 0.7 s (`splats/empty-<variant>.ply`, the
+  ceilings in `...-ceiling.ply` beside it, `materials.write_shell`). MCP: `get_finishes`,
+  `set_finish`; plan and eye renders draw the finish colors (and eye renders now clip at the near
+  plane: floors used to vanish).
+- **Editor.** Until now it never loaded the empty-home splat (the room endpoint didn't send it): the
+  room was the mesh walls and floors in the scanned finishes. Now it shows the splat, ceilings in
+  walk view only, and in orbit cuts away walls between the camera and their room (Spark
+  `SplatEdit` boxes; Gaussians show from both sides, so fading won't do). A Finishes panel edits
+  paint and materials per space for the layout shown.
+- **MCP connection.** `.mcp.json` runs `.venv/bin/mise` when there is one (`mise` isn't on PATH
+  outside the venv; the server failed to start).
+- **Products.** Listings parse on real IKEA pages (title, price, dimensions, image); a rug whose
+  page lists no dimensions asks for them (`needs_input`). Idol runs from the open weights on Colab
+  (`run_learned_recon.py NAME --idol DIR`, `MISE_IDOL=colab`): installed and started on an L4, then
+  stopped at the gated encoders: the owner's HF account has to accept DINOv3 (by hand) and
+  FLUX.2-dev. Until then imports are labeled boxes at the listed size.
+- **Stage 6, once, with a stand-in brief** (warmer main room, reading seat, storage, ~$600) driven
+  through the MCP tools: variant "Warm reading corner" in `home-v4` (walls #ddd3c2 incl. the block
+  wall, FULLMAKT rug, POÄNG facing the sofa, BILLY on the west wall), no new hard violations,
+  shopping list $527.99. Not judged by the owner yet.
+
 ## Next steps
 
 1. Stage 1 loose ends: the main room's 4.88 m span (-6%: the outline stops at the desk), the

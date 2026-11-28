@@ -48,12 +48,12 @@ For editor development with hot reload, run `npm run dev` in `editor/` (it proxi
 
 | Stage | Code | Status |
 | --- | --- | --- |
-| 1 Capture and metric scale | `pipeline/scale.py` (triangulate markers, per-marker scale, held-out report), `pipeline/markers.py` (ArUco detection, printable sheets), `pipeline/normalize.py` (RANSAC floor, z up, Manhattan wall alignment) | Implemented and tested on synthetic data; needs a real capture |
-| 2 Reconstruction and decomposition | `pipeline/external.py` (Nerfstudio commands), `pipeline/decompose.py` (split labeled splat, OBBs, canonical frames, shadow-dilated removal, plane + texture-copy floor fill, `scene.json` packaging) | Packaging and the H2 baseline arm are implemented. Gaussian Grouping, SAM 3D and Inpaint360GS run as external tools |
-| 3 Scene model and editor | `scene/` (models, geometry, checks, snapping, op log with undo/redo, variants, diff/promote), `backend/app.py` (FastAPI + WebSocket), `editor/` (three.js + Spark) | Working: orbit / walk / plan, drag, rotate, snap, live warnings, add, delete, history, per-change accept |
-| 4 Adding objects at true scale | `products/` (listing extraction, dimension parser, Idol client, orientation, uniform scale fit + anisotropy gate, box fallback, color match) | Working end to end with a stand-in generator; the Idol endpoint details still need checking (see below) |
-| 5 MCP server | `mcp_server/server.py`: every tool in the plan's table, plus `solve_layout`, `shopping_list`, `list_variants`, `get_job`, `undo` | Working over stdio and in-process |
-| 6 AI design agent | `.claude/skills/redesign-room/SKILL.md`, `agent/solver.py` (relations + physics, simulated annealing + walkway repair), `agent/shopping.py` | Working; layout quality is what H5 will measure |
+| 1 Video to measured layout | `pipeline/learned_flow.py` (learned camera solves on Colab, room by room), `pipeline/scan.py`, `pipeline/room_outline.py`, `eval/floorplan.py` | Working on a real walkthrough: scale from a known object (no markers), rooms, doorways, walls |
+| 2 Splats, empty home, objects | `pipeline/splat_flow.py` (room splats on Colab), `pipeline/shell.py` + `materials.py` + `trim.py` (empty home from the photos: materials, block, trim, windows, doors), `pipeline/objects.py` | Working on a real walkthrough; `mise learned-scan ... --splat` does Stages 1 and 2 in one command |
+| 3 Scene model and editor | `scene/` (models, geometry, checks, snapping, op log with undo/redo, variants, diff/promote, finishes per layout), `backend/app.py` (FastAPI + WebSocket), `editor/` (three.js + Spark) | Working: orbit / walk / plan over the empty-home splat, drag, rotate, snap, live warnings, add, delete, history, per-change accept, a Finishes panel (paint, floors) |
+| 4 Adding objects at true scale | `products/` (listing extraction, dimension parser, Idol on Colab or hosted, orientation, uniform scale fit + anisotropy gate, box fallback, color match) | Listings parse on real retailer pages; 3D generation needs Idol's gated encoders on your Hugging Face account (see below), else products are labeled boxes at their listed size |
+| 5 MCP server | `mcp_server/server.py`: every tool in the plan's table, plus `solve_layout`, `shopping_list`, `get_finishes`, `set_finish`, `list_variants`, `get_job`, `undo` | Working over stdio and in-process |
+| 6 AI design agent | `.claude/skills/redesign-room/SKILL.md`, `agent/solver.py` (relations + physics, simulated annealing + walkway repair), `agent/shopping.py` | Run once on a scanned home (a stand-in brief); layout quality is what H5 will measure |
 | Evaluation | `eval/hypotheses.py`: H1 to H6 scoring, Chamfer, masked LPIPS, blind A/B study builder | Helpers ready; experiments not run |
 
 ## Scene conventions
@@ -222,7 +222,15 @@ the generator's axes and tries every 90° arrangement against the listing instea
 listed lying down but generated standing up is matched by tipping it, not rejected.
 Pass `upright_only` to `import_product` to override the category default.
 
-**Idol API details are not verified.** The docs hosts were unreachable from the build
+**Idol on your own Colab (open weights).** `MISE_IDOL=colab mise serve` makes product imports
+run [Idol](https://huggingface.co/speridlabs/idol) on a Colab GPU (`products/idol.py` `IdolColab`,
+`scripts/colab/idol_run.py`; a few minutes per product, most of it starting the VM). Idol downloads
+two gated encoders, so the Hugging Face account logged in on this machine must have accepted the
+terms of [DINOv3](https://huggingface.co/facebook/dinov3-vith16plus-pretrain-lvd1689m) (approved
+by hand) and [FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev). The token goes to
+the run's own VM inside its input bundle. Check Idol's output axes on the first real run.
+
+**Hosted Idol (fal) API details are not verified.** The docs hosts were unreachable from the build
 environment, so `products/idol.py` uses fal's generic queue API, and the model ids and
 the image field name are settings (`IDOL_MODEL`, `IDOL_MAX_MODEL`, `IDOL_IMAGE_FIELD`).
 The response is searched for the first `.ply`/`.glb` URL. Check these against

@@ -97,3 +97,31 @@ def test_import_asks_when_dimensions_missing(tmp_path):
     with pytest.raises(NeedsInput):
         run_import(ImportRequest(url="u", category="sofa"), tmp_path, FakeGenerator([(1, 1, 1)]),
                    listing=fake_listing(dims=None))
+
+
+def test_idol_on_colab_runs_the_launcher_and_returns_the_splat(tmp_path):
+    import json
+
+    from mise.products.idol import IdolColab
+
+    from .conftest import synthetic_sofa_splat
+
+    img = tmp_path / "chair.jpg"
+    img.write_bytes(b"\xff\xd8fake")
+    seen = {}
+
+    def runner(cmd, log):
+        seen["cmd"] = cmd
+        inp = cmd[cmd.index("--idol") + 1]
+        seen["jobs"] = json.loads((tmp_path / "gen" / "idol-in" / "images.json").read_text())
+        out = tmp_path / "gen" / "idol-out"
+        out.mkdir(parents=True)
+        synthetic_sofa_splat(out / "product.ply")
+        (out / "meta.json").write_text(json.dumps({"items": [{"seconds": 50}]}))
+        log.write_text("ok")
+        return 0 if inp else 1
+
+    res = IdolColab(repo=tmp_path, runner=runner).generate(str(img), tmp_path / "gen", image_type="synthetic")
+    assert res.kind == "splat" and res.path.exists() and res.up_axis is None
+    assert seen["jobs"] == [{"name": "product.jpg", "mode": "synthetic"}]
+    assert "--num-gaussians" in seen["cmd"] and seen["cmd"][2].startswith("idol-")

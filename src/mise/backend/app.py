@@ -182,7 +182,10 @@ def create_app(data_dir: Path | None = None, generator=None, listing_fetcher=Non
     jobs: dict[str, Job] = {}
     sockets: dict[str, set[WebSocket]] = {}
 
-    if generator is None and os.environ.get("FAL_KEY"):
+    if generator is None and os.environ.get("MISE_IDOL") == "colab":  # open Idol weights on your Colab
+        from ..products.idol import IdolColab
+        generator = IdolColab()
+    elif generator is None and os.environ.get("FAL_KEY"):  # hosted Idol (fal)
         from ..products.idol import IdolClient
         generator = IdolClient()
 
